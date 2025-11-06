@@ -1,0 +1,43 @@
+{
+  "public": {
+  },
+  "hpp": {
+    "activeNetwork": "sepolia",
+    "backfill": {
+      "bridgeActivity": {
+        "enabled": true,
+        "blockCount": -1
+      }
+    },
+    "networks": {
+      "mainnet": {
+        "networkName": "HPP Mainnet",
+        "chainId": 190415,
+        "rpcEndpoint": "https://mainnet.hpp.io",
+        "wssEndpoint": "wss://mainnet.hpp.io",
+        "blockExplorer": "https://explorer.hpp.io",
+        "currencySymbol": "ETH",
+        "l1": {
+          "chainId": 1,
+          "rpcEndpoint": "https://ethereum-rpc.publicnode.com",
+          "bridgeContract": "TBD",
+          "inboxContract": "TBD"
+        }
+      },
+      "sepolia": {
+        "networkName": "HPP Sepolia",
+        "chainId": 181228,
+        "rpcEndpoint": "https://sepolia.hpp.io",
+        "wssEndpoint": "wss://sepolia.hpp.io",
+        "blockExplorer": "https://sepolia-explorer.hpp.io",
+        "currencySymbol": "ETH",
+        "l1": {
+          "chainId": 11155111,
+          "rpcEndpoint": "https://ethereum-sepolia-rpc.publicnode.com",
+          "bridgeContract": "0x1DDe0F57E7889B6866505634E58E3057b01dfed0",
+          "inboxContract": "0xAAD45a7bF65b43E56767CdE3Ab84A5433c714Afc"
+        }
+      }
+    }
+  }
+}

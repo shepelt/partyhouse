@@ -1,0 +1,12 @@
+{
+  "public": {
+  },
+  "hpp": {
+    "networkName": "HPP Sepolia",
+    "chainId": 181228,
+    "rpcEndpoint": "https://sepolia.hpp.io",
+    "wssEndpoint": "wss://sepolia.hpp.io",
+    "blockExplorer": "https://sepolia-explorer.hpp.io",
+    "currencySymbol": "ETH"
+  }
+}
