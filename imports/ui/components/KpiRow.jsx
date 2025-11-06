@@ -27,7 +27,7 @@ const SimpleLineChart = ({ data, dataKey, color = '#8b5cf6', title = 'Last 7 day
   const chartHeight = height - padding.top - padding.bottom;
 
   const points = data.map((d, i) => {
-    const x = padding.left + (i / (data.length - 1)) * chartWidth;
+    const x = padding.left + (data.length > 1 ? (i / (data.length - 1)) * chartWidth : chartWidth / 2);
     const value = d[dataKey] || 0;
     const y = padding.top + chartHeight - ((value - min) / range) * chartHeight;
     return `${x},${y}`;
@@ -86,7 +86,7 @@ const SimpleLineChart = ({ data, dataKey, color = '#8b5cf6', title = 'Last 7 day
 
       {/* Points */}
       {data.map((d, i) => {
-        const x = padding.left + (i / (data.length - 1)) * chartWidth;
+        const x = padding.left + (data.length > 1 ? (i / (data.length - 1)) * chartWidth : chartWidth / 2);
         const value = d[dataKey] || 0;
         const y = padding.top + chartHeight - ((value - min) / range) * chartHeight;
         return (
