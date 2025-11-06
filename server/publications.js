@@ -11,7 +11,7 @@ import {
  */
 Meteor.publish('dailyTransactions.latest', function() {
   return DailyTransactionsCollection.find({}, {
-    sort: { date: -1 },
+    sort: { updatedAt: -1 },
     limit: 1
   });
 });
@@ -34,7 +34,7 @@ Meteor.publish('dailyTransactions.history', function(days = 7) {
  */
 Meteor.publish('weeklyActiveAddresses.latest', function() {
   return WeeklyActiveAddressesCollection.find({}, {
-    sort: { timestamp: -1 },
+    sort: { updatedAt: -1 },
     limit: 1
   });
 });
@@ -44,7 +44,7 @@ Meteor.publish('weeklyActiveAddresses.latest', function() {
  */
 Meteor.publish('weeklyActiveAddresses.history', function(days = 7) {
   return WeeklyActiveAddressesCollection.find({}, {
-    sort: { timestamp: -1 },
+    sort: { updatedAt: -1 },
     limit: days
   });
 });

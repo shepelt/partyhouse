@@ -12,6 +12,9 @@ import { BlockchainStatus } from './BlockchainStatus';
 import { KpiRow } from './KpiRow';
 
 export const Dashboard = () => {
+  // Get block explorer URL from settings
+  const blockExplorer = Meteor.settings.public?.blockExplorer || 'https://explorer.hpp.io';
+
   // Modal state
   const [showAddressModal, setShowAddressModal] = useState(false);
   const [addressDetails, setAddressDetails] = useState([]);
@@ -40,8 +43,8 @@ export const Dashboard = () => {
     const isLoading = !dailyTxSub.ready() || !weeklyAddrSub.ready() || !tvlSub.ready();
 
     // Get latest records
-    const latestDailyTx = DailyTransactionsCollection.findOne({}, { sort: { date: -1 } });
-    const latestWeeklyAddr = WeeklyActiveAddressesCollection.findOne({}, { sort: { timestamp: -1 } });
+    const latestDailyTx = DailyTransactionsCollection.findOne({}, { sort: { updatedAt: -1 } });
+    const latestWeeklyAddr = WeeklyActiveAddressesCollection.findOne({}, { sort: { updatedAt: -1 } });
     const latestTvl = TvlCollection.findOne({}, { sort: { timestamp: -1 } });
 
     // Get historical data (matching the publication filters)
@@ -51,7 +54,7 @@ export const Dashboard = () => {
     ).fetch();
     const addrHistoryData = WeeklyActiveAddressesCollection.find(
       {},
-      { sort: { timestamp: -1 }, limit: days }
+      { sort: { updatedAt: -1 }, limit: days }
     ).fetch().reverse(); // Reverse to get chronological order
     const tvlHistoryData = TvlCollection.find(
       {},
@@ -253,7 +256,7 @@ export const Dashboard = () => {
                     <tr key={addr.address}>
                       <td className="address-cell">
                         <a
-                          href={`https://sepolia-explorer.hpp.io/address/${addr.address}`}
+                          href={`${blockExplorer}/address/${addr.address}`}
                           target="_blank"
                           rel="noopener noreferrer"
                         >

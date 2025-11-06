@@ -32,6 +32,7 @@ Meteor.startup(async () => {
   console.log('🔄 Fetching initial KPI data...');
   try {
     await updateDailyTransactionCount();
+    await updateWeeklyActiveAddresses();
     await updateTVL();
   } catch (error) {
     console.error('❌ Initial KPI fetch failed:', error.message);
