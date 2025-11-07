@@ -8,12 +8,12 @@ import {
 } from '../../api/collections';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { TrendingUp, Users, DollarSign, ArrowUpDown } from 'lucide-react';
-import { BlockchainStatus } from './BlockchainStatus';
 import { KpiRow } from './KpiRow';
 
 export const Dashboard = () => {
-  // Get block explorer URL from settings
+  // Get settings from public config
   const blockExplorer = Meteor.settings.public?.blockExplorer || 'https://explorer.hpp.io';
+  const networkName = Meteor.settings.public?.networkName || 'HPP';
 
   // Modal state
   const [showAddressModal, setShowAddressModal] = useState(false);
@@ -21,6 +21,9 @@ export const Dashboard = () => {
 
   // 24h transactions state
   const [transactions24h, setTransactions24h] = useState('---');
+
+  // Network info state
+  const [networkInfo, setNetworkInfo] = useState(null);
 
   // Bridge-related state (still using methods as they're calculated values, not stored directly)
   const [bridgeActivity, setBridgeActivity] = useState('---');
@@ -76,6 +79,23 @@ export const Dashboard = () => {
       isLoading
     };
   }, []);
+
+  useEffect(() => {
+    // Set page title based on network
+    document.title = `PartyHouse Analytics - ${networkName}`;
+
+    // Fetch network info
+    Meteor.callAsync('blockchain.getNetworkInfo').then(setNetworkInfo).catch(console.error);
+
+    // Update network info every 30 seconds
+    const networkInterval = setInterval(() => {
+      Meteor.callAsync('blockchain.getNetworkInfo').then(setNetworkInfo).catch(console.error);
+    }, 30000);
+
+    return () => {
+      clearInterval(networkInterval);
+    };
+  }, [networkName]);
 
   useEffect(() => {
     // Fetch 24h transactions, bridge activity and volume (these are calculated on-demand, not stored in DB)
@@ -164,7 +184,14 @@ export const Dashboard = () => {
     <div className="dashboard">
       <div className="dashboard-header">
         <h2>Dashboard</h2>
-        <p>Real-time KPI monitoring for House Party Protocol</p>
+        <p>
+          Real-time KPI monitoring for {networkName}
+          {networkInfo && (
+            <span style={{ marginLeft: '12px', color: '#888', fontSize: '0.9em' }}>
+              • Block {networkInfo.blockNumber?.toLocaleString()} • Chain ID {networkInfo.chainId}
+            </span>
+          )}
+        </p>
       </div>
 
       <div className="kpi-rows">
@@ -229,24 +256,6 @@ export const Dashboard = () => {
           chartColor="#ec4899"
           chartTitle="Bridge Volume (7d)"
         />
-      </div>
-
-      <div className="chart-grid">
-        <div className="chart-col-3">
-          <BlockchainStatus />
-        </div>
-
-        <Card className="chart-col-4">
-          <CardHeader>
-            <CardTitle>Recent Activity</CardTitle>
-            <CardDescription>Latest protocol events</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="chart-placeholder">
-              Activity feed - coming soon
-            </div>
-          </CardContent>
-        </Card>
       </div>
 
       {/* Address Details Modal */}

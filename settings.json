@@ -1,5 +1,6 @@
 {
   "public": {
+    "networkName": "HPP Sepolia"
   },
   "hpp": {
     "activeNetwork": "sepolia",
