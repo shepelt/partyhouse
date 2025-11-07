@@ -1,6 +1,7 @@
 import { Meteor } from 'meteor/meteor';
 import {
   updateDailyTransactionCount,
+  calculate24hTransactions,
   calculateTVL,
   calculateBridgeActivityFromTransactions,
   calculateBridgeVolume,
@@ -18,6 +19,7 @@ export async function startScheduledJobs() {
   console.log('🚀 Running initial KPI updates...');
   try {
     await Promise.all([
+      calculate24hTransactions(),
       calculateTVL(),
       calculateBridgeActivityFromTransactions(),
       calculateBridgeVolume()
@@ -54,6 +56,16 @@ export async function startScheduledJobs() {
       await calculateBridgeVolume();
     } catch (error) {
       console.error('❌ Error in scheduled bridge volume update:', error.message);
+    }
+  }, 5 * 60 * 1000); // 5 minutes
+
+  // Update 24h transaction count every 5 minutes
+  setInterval(async () => {
+    try {
+      console.log('⏰ Running scheduled 24h transaction update...');
+      await calculate24hTransactions();
+    } catch (error) {
+      console.error('❌ Error in scheduled 24h transaction update:', error.message);
     }
   }, 5 * 60 * 1000); // 5 minutes
 

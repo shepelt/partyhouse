@@ -3,6 +3,7 @@ import { getNetworkInfo, getBlockNumber } from '../../server/blockchain.js';
 import {
   getTodayTransactions,
   updateDailyTransactionCount,
+  calculate24hTransactions,
   getWeeklyActiveAddresses,
   getWeeklyActiveAddressDetails,
   calculateTVL,
@@ -55,6 +56,15 @@ Meteor.methods({
   async 'kpis.updateDailyTransactionCount'() {
     if (!this.isSimulation) {
       return await updateDailyTransactionCount();
+    }
+  },
+
+  /**
+   * Get transactions in last 24 hours
+   */
+  async 'kpis.get24hTransactions'() {
+    if (!this.isSimulation) {
+      return await calculate24hTransactions();
     }
   },
 

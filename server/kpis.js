@@ -12,9 +12,6 @@ import {
 let ethPriceCache = { price: null, timestamp: 0 };
 const PRICE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-// Blockscout API base URL
-const BLOCKSCOUT_API = 'https://sepolia-explorer.hpp.io/api/v2';
-
 /**
  * Get active network configuration
  */
@@ -85,7 +82,9 @@ export async function getEthPrice() {
  */
 async function fetchDepositAmount(txHash) {
   try {
-    const url = `${BLOCKSCOUT_API}/transactions/${txHash}/internal-transactions`;
+    const config = getActiveNetworkConfig();
+    const explorerApiUrl = `${config.blockExplorer}/api/v2`;
+    const url = `${explorerApiUrl}/transactions/${txHash}/internal-transactions`;
     const response = await fetch(url);
 
     if (!response.ok) {
@@ -115,6 +114,28 @@ async function fetchDepositAmount(txHash) {
   } catch (error) {
     console.error(`Error fetching internal txs for ${txHash}:`, error.message);
     return 0;
+  }
+}
+
+/**
+ * Calculate transactions in last 24 hours from stored activity data
+ * Counts transactions recorded in AddressActivityCollection in last 24h
+ */
+export async function calculate24hTransactions() {
+  try {
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now - 24 * 60 * 60 * 1000);
+
+    // Count all address activities (transactions) in last 24h
+    const count = await AddressActivityCollection.find({
+      timestamp: { $gte: twentyFourHoursAgo }
+    }).countAsync();
+
+    console.log(`✅ 24h transactions: ${count}`);
+    return { count };
+  } catch (error) {
+    console.error('Error calculating 24h transactions:', error.message);
+    return { count: 0 };
   }
 }
 

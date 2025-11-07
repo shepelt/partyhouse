@@ -19,6 +19,9 @@ export const Dashboard = () => {
   const [showAddressModal, setShowAddressModal] = useState(false);
   const [addressDetails, setAddressDetails] = useState([]);
 
+  // 24h transactions state
+  const [transactions24h, setTransactions24h] = useState('---');
+
   // Bridge-related state (still using methods as they're calculated values, not stored directly)
   const [bridgeActivity, setBridgeActivity] = useState('---');
   const [bridgeVolume, setBridgeVolume] = useState('---');
@@ -65,7 +68,7 @@ export const Dashboard = () => {
       dailyTransactions: latestDailyTx?.count?.toLocaleString() || '---',
       weeklyActiveAddresses: latestWeeklyAddr?.count?.toLocaleString() || '---',
       tvl: latestTvl?.tvlInUSD
-        ? `$${latestTvl.tvlInUSD.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        ? `$${latestTvl.tvlInUSD.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
         : '---',
       txHistory: txHistoryData,
       addressHistory: addrHistoryData,
@@ -75,20 +78,22 @@ export const Dashboard = () => {
   }, []);
 
   useEffect(() => {
-    // Fetch bridge activity and volume (these are calculated on-demand, not stored in DB)
+    // Fetch 24h transactions, bridge activity and volume (these are calculated on-demand, not stored in DB)
+    fetch24hTransactions();
     fetchBridgeActivity();
     fetchBridgeVolume();
     fetchBridgeHistoricalData();
 
-    // Update bridge metrics every 5 minutes (matches server-side calculation schedule)
-    const bridgeInterval = setInterval(() => {
+    // Update metrics every 5 minutes (matches server-side calculation schedule)
+    const metricsInterval = setInterval(() => {
+      fetch24hTransactions();
       fetchBridgeActivity();
       fetchBridgeVolume();
       fetchBridgeHistoricalData();
     }, 5 * 60 * 1000);
 
     return () => {
-      clearInterval(bridgeInterval);
+      clearInterval(metricsInterval);
     };
   }, []);
 
@@ -134,6 +139,17 @@ export const Dashboard = () => {
     }
   };
 
+  const fetch24hTransactions = async () => {
+    try {
+      const result = await Meteor.callAsync('kpis.get24hTransactions');
+      if (result && result.count !== undefined) {
+        setTransactions24h(result.count.toLocaleString());
+      }
+    } catch (error) {
+      console.error('Error fetching 24h transactions:', error);
+    }
+  };
+
   const handleAddressCardClick = async () => {
     try {
       const details = await Meteor.callAsync('kpis.getWeeklyActiveAddressDetails');
@@ -153,11 +169,11 @@ export const Dashboard = () => {
 
       <div className="kpi-rows">
         <KpiRow
-          title="Daily Transactions"
-          value={dailyTransactions}
-          description="Total transactions today"
+          title="Transactions (24h)"
+          value={transactions24h}
+          description="Transactions in last 24 hours"
           icon={TrendingUp}
-          isLoading={isLoading}
+          isLoading={false}
           chartData={txHistory}
           chartDataKey="count"
           chartColor="#8b5cf6"
