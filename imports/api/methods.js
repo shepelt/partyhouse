@@ -18,7 +18,7 @@ import {
   backfillDailyTransactionHistory,
   backfillWeeklyActiveAddressHistory,
   backfillTvlHistory,
-  backfillBridgeActivity,
+  backfillHistoricalData,
   backfillDepositAmounts
 } from '../../server/kpis.js';
 
@@ -187,12 +187,12 @@ Meteor.methods({
   },
 
   /**
-   * Backfill bridge activity by scanning historical blocks
-   * Scans all processed blocks for type 105 deposits and ArbSys withdrawals
+   * Backfill historical KPI data by scanning past blocks
+   * Scans blocks for address activity, deposits, withdrawals, and bridge activity
    */
-  async 'kpis.backfillBridgeActivity'() {
+  async 'kpis.backfillHistoricalData'() {
     if (!this.isSimulation) {
-      return await backfillBridgeActivity();
+      return await backfillHistoricalData();
     }
   },
 
@@ -203,6 +203,96 @@ Meteor.methods({
   async 'kpis.backfillDepositAmounts'() {
     if (!this.isSimulation) {
       return await backfillDepositAmounts();
+    }
+  },
+
+  /**
+   * Check bridge activity data in database
+   */
+  async 'kpis.checkBridgeData'() {
+    if (!this.isSimulation) {
+      const { BridgeActivityCollection } = await import('../imports/api/collections.js');
+
+      const totalRecords = await BridgeActivityCollection.find().countAsync();
+      const erc20Count = await BridgeActivityCollection.find({ type: 'erc20_bridge' }).countAsync();
+      const ethDepositCount = await BridgeActivityCollection.find({ type: 'deposit' }).countAsync();
+      const withdrawalCount = await BridgeActivityCollection.find({ type: 'withdrawal' }).countAsync();
+
+      const erc20Deposits = await BridgeActivityCollection.find({ type: 'erc20_bridge' }).fetchAsync();
+
+      const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
+      const recentCount = await BridgeActivityCollection.find({
+        timestamp: { $gte: twentyFourHoursAgo }
+      }).countAsync();
+
+      return {
+        totalRecords,
+        ethDepositCount,
+        erc20Count,
+        withdrawalCount,
+        recentCount,
+        erc20Deposits: erc20Deposits.map(d => ({
+          asset: d.asset,
+          value: d.value,
+          blockNumber: d.blockNumber,
+          timestamp: d.timestamp,
+          txHash: d.txHash
+        }))
+      };
+    }
+  },
+
+  /**
+   * Check specific block for type 105 transactions
+   */
+  async 'kpis.checkBlock'(blockNumber) {
+    if (!this.isSimulation) {
+      const { getProvider } = await import('../../server/blockchain.js');
+      const provider = getProvider();
+
+      const block = await provider.getBlockWithTransactions(blockNumber);
+
+      console.log(`\n=== Block ${blockNumber} Check ===`);
+      console.log(`Timestamp: ${new Date(block.timestamp * 1000).toISOString()}`);
+      console.log(`Total transactions: ${block.transactions.length}`);
+
+      const type105Txs = block.transactions.filter(tx => tx.type === 105);
+      console.log(`Type 105 transactions: ${type105Txs.length}`);
+
+      const results = [];
+
+      for (const tx of type105Txs) {
+        console.log(`\nType 105 TX: ${tx.hash}`);
+        console.log(`  From: ${tx.from}`);
+        console.log(`  To: ${tx.to || 'null'}`);
+        console.log(`  Value: ${tx.value?.toString()} wei`);
+
+        const receipt = await provider.getTransactionReceipt(tx.hash);
+        console.log(`  Logs: ${receipt.logs?.length || 0}`);
+
+        const TRANSFER_EVENT = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+        const transferLogs = receipt.logs.filter(log => log.topics[0] === TRANSFER_EVENT);
+        console.log(`  Transfer events: ${transferLogs.length}`);
+
+        transferLogs.forEach((log, i) => {
+          console.log(`    Transfer ${i + 1}: token=${log.address}, data length=${log.data.length}`);
+        });
+
+        results.push({
+          hash: tx.hash,
+          from: tx.from,
+          to: tx.to,
+          value: tx.value?.toString(),
+          logsCount: receipt.logs?.length || 0,
+          transferEventsCount: transferLogs.length,
+          transferEvents: transferLogs.map(log => ({
+            tokenAddress: log.address,
+            data: log.data
+          }))
+        });
+      }
+
+      return { blockNumber, type105Count: type105Txs.length, transactions: results };
     }
   },
 });

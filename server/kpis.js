@@ -250,106 +250,309 @@ const SYSTEM_ADDRESSES = [
 
 /**
  * Process new blocks incrementally and store address activity
+ * @param {number} forceStartBlock - Optional: override start block (for backfill)
  * Returns: number of new blocks processed
  */
-export async function processNewBlocks() {
+export async function processNewBlocks(forceStartBlock = null) {
   try {
     const provider = getProvider();
     const currentBlock = await provider.getBlockNumber();
 
-    // Get last processed block from collection
-    const lastActivity = await AddressActivityCollection.findOneAsync(
-      {},
-      { sort: { blockNumber: -1 }, limit: 1 }
-    );
-
-    const startBlock = lastActivity ? lastActivity.blockNumber + 1 : Math.max(0, currentBlock - 100);
+    let startBlock;
+    if (forceStartBlock !== null) {
+      // Use provided start block for backfill
+      startBlock = forceStartBlock;
+    } else {
+      // Get last processed block from collection
+      const lastActivity = await AddressActivityCollection.findOneAsync(
+        {},
+        { sort: { blockNumber: -1 }, limit: 1 }
+      );
+      startBlock = lastActivity ? lastActivity.blockNumber + 1 : Math.max(0, currentBlock - 100);
+    }
 
     if (startBlock > currentBlock) {
       console.log('Already up to date at block', currentBlock);
       return 0;
     }
 
-    console.log(`Processing blocks ${startBlock} to ${currentBlock}...`);
+    const totalBlocks = currentBlock - startBlock + 1;
+    console.log(`Processing blocks ${startBlock} to ${currentBlock} (${totalBlocks} blocks)...`);
 
+    const BATCH_SIZE = 20; // Process 20 blocks in parallel
     let addressesAdded = 0;
-    for (let i = startBlock; i <= currentBlock; i++) {
-      const block = await getBlock(i);
+    let depositsDetected = 0;
+    const startTime = Date.now();
 
-      if (block && block.transactions) {
-        const blockTimestamp = block.timestamp ? new Date(block.timestamp * 1000) : new Date();
+    // Process blocks in batches for better performance
+    for (let batchStart = startBlock; batchStart <= currentBlock; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, currentBlock);
+      const batchPromises = [];
 
-        for (const txHash of block.transactions) {
-          try {
-            const tx = await provider.getTransaction(txHash);
-            if (tx && tx.from) {
-              // Insert address activity record (record everything)
-              await AddressActivityCollection.insertAsync({
-                address: tx.from.toLowerCase(),
-                timestamp: blockTimestamp,
-                blockNumber: i
-              });
-              addressesAdded++;
+      // Create parallel promises for this batch
+      for (let i = batchStart; i <= batchEnd; i++) {
+        batchPromises.push(processBlock(i, provider));
+      }
 
-              // Detect bridge deposits (L1→L2)
-              // Arbitrum Orbit uses type 105 for L1→L2 deposits
-              if (tx.type === 105) {
-                // For deposit transactions, fetch the actual value from internal transactions
-                try {
-                  const receipt = await provider.getTransactionReceipt(txHash);
+      // Wait for all blocks in batch to complete
+      const batchResults = await Promise.all(batchPromises);
 
-                  // Fetch deposit amount from internal transactions
+      // Aggregate results
+      for (const result of batchResults) {
+        addressesAdded += result.addressesAdded;
+        depositsDetected += result.depositsDetected;
+      }
+
+      // Log progress every 100 blocks with performance metrics
+      if (batchEnd % 100 < BATCH_SIZE) {
+        const processed = batchEnd - startBlock + 1;
+        const elapsed = (Date.now() - startTime) / 1000; // seconds
+        const blocksPerSec = (processed / elapsed).toFixed(1);
+        const progress = ((processed / totalBlocks) * 100).toFixed(1);
+        const remaining = totalBlocks - processed;
+        const etaSeconds = remaining / parseFloat(blocksPerSec);
+        const etaMinutes = (etaSeconds / 60).toFixed(1);
+
+        console.log(`  Processed ${processed}/${totalBlocks} blocks (${progress}%) - ${blocksPerSec} blocks/sec - ETA: ${etaMinutes} min`);
+      }
+    }
+
+    return addressesAdded;
+  } catch (error) {
+    console.error('Error in processNewBlocks:', error.message);
+    return 0;
+  }
+}
+
+/**
+ * Process a single block (extracted for parallel processing)
+ */
+async function processBlock(blockNumber, provider) {
+  let addressesAdded = 0;
+  let depositsDetected = 0;
+
+  try {
+    const block = await getBlock(blockNumber);
+
+    if (block && block.transactions) {
+      const blockTimestamp = block.timestamp ? new Date(block.timestamp * 1000) : new Date();
+
+      for (const txHash of block.transactions) {
+        try {
+          const tx = await provider.getTransaction(txHash);
+          if (tx && tx.from) {
+            // Insert address activity record (record everything)
+            await AddressActivityCollection.insertAsync({
+              address: tx.from.toLowerCase(),
+              timestamp: blockTimestamp,
+              blockNumber: blockNumber
+            });
+            addressesAdded++;
+
+            // Get network config once for this transaction
+            const networkConfig = getActiveNetworkConfig();
+            const l1Config = networkConfig?.l1;
+
+            // Detect bridge deposits (L1→L2)
+            // Arbitrum Orbit uses type 105 for L1→L2 deposits
+            if (tx.type === 105) {
+              console.log(`🔍 Found type 105 transaction in block ${blockNumber}: ${txHash}`);
+              try {
+                let isTokenDeposit = false;
+                let tokenSymbol = null;
+                let tokenAmount = 0;
+                let tokenL1Address = null;
+                let tokenL2Address = null;
+
+                // Check if this is an ERC-20 token deposit by looking for L1 token addresses in calldata
+                // Type 105 transactions encode the token info in calldata, not in Transfer events
+                if (tx.data && l1Config?.erc20Tokens) {
+                  const calldata = tx.data.toLowerCase();
+
+                  for (const token of l1Config.erc20Tokens) {
+                    if (token.l1Address) {
+                      const l1AddrLower = token.l1Address.toLowerCase().replace('0x', '');
+
+                      if (calldata.includes(l1AddrLower)) {
+                        // Found L1 token address in calldata - this is a token deposit!
+                        isTokenDeposit = true;
+                        tokenSymbol = token.symbol;
+                        tokenL1Address = token.l1Address;
+                        tokenL2Address = token.l2Address;
+
+                        // Parse amount from calldata
+                        // For Arbitrum type 105 (submitRetryable), the token info is in the retryData parameter
+                        // retryData contains finalizeInboundTransfer(token, from, to, amount, data)
+                        // Amount is the 4th parameter (after function selector, token, from, to)
+                        try {
+                          const { ethers } = await import('ethers');
+
+                          // Find the position of the L1 token address in calldata
+                          const tokenPos = calldata.indexOf(l1AddrLower);
+
+                          if (tokenPos > 0) {
+                            // Amount is 3 parameters (192 chars / 96 bytes) after the token address
+                            // Each parameter is 64 hex chars (32 bytes)
+                            const amountPos = tokenPos + l1AddrLower.length + (64 * 2); // Skip 'from' and 'to' parameters
+
+                            if (amountPos + 64 <= calldata.length) {
+                              const amountHex = calldata.substring(amountPos, amountPos + 64);
+                              const value = ethers.BigNumber.from('0x' + amountHex);
+                              tokenAmount = Number(value) / Math.pow(10, token.decimals);
+
+                              console.log(`  💰 Parsed amount: ${tokenAmount.toLocaleString()} ${tokenSymbol}`);
+                            }
+                          }
+                        } catch (e) {
+                          console.warn(`  ⚠️  Could not parse amount for ${tokenSymbol} deposit: ${e.message}`);
+                        }
+
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                if (isTokenDeposit && tokenSymbol) {
+                  // ERC-20 token deposit
+                  console.log(`  ✅ ERC-20 deposit detected: ${tokenAmount || '(amount unknown)'} ${tokenSymbol} in block ${blockNumber}`);
+                  await BridgeActivityCollection.insertAsync({
+                    txHash: txHash,
+                    type: 'erc20_bridge',
+                    asset: tokenSymbol,
+                    tokenAddress: tokenL2Address || tokenL1Address,
+                    from: tx.from.toLowerCase(),
+                    to: tx.to ? tx.to.toLowerCase() : null,
+                    value: tokenAmount,
+                    timestamp: blockTimestamp,
+                    blockNumber: blockNumber,
+                    l2TxHash: txHash
+                  });
+                } else {
+                  // ETH deposit
+                  console.log(`  ℹ️  ETH deposit in block ${blockNumber}`);
                   const depositAmount = await fetchDepositAmount(txHash);
 
                   await BridgeActivityCollection.insertAsync({
                     txHash: txHash,
                     type: 'deposit',
+                    asset: 'ETH',
                     from: tx.from.toLowerCase(),
                     to: tx.to ? tx.to.toLowerCase() : null,
-                    value: depositAmount, // Fetched from internal transactions
+                    value: depositAmount,
                     timestamp: blockTimestamp,
-                    blockNumber: i,
+                    blockNumber: blockNumber,
                     l2TxHash: txHash
                   });
-
-                  depositsDetected++;
-                } catch (receiptError) {
-                  // Continue even if receipt fetch fails
                 }
-              }
 
-              // Detect withdrawals (L2→L1)
-              // Withdrawals call the ArbSys precompile
-              const ARBSYS_ADDRESS = '0x0000000000000000000000000000000000000064';
-              if (tx.to && tx.to.toLowerCase() === ARBSYS_ADDRESS && tx.value && Number(tx.value) > 0) {
-                await BridgeActivityCollection.insertAsync({
-                  txHash: txHash,
-                  type: 'withdrawal',
-                  from: tx.from.toLowerCase(),
-                  to: ARBSYS_ADDRESS,
-                  value: Number(tx.value) / 1e18, // Convert to ETH
-                  timestamp: blockTimestamp,
-                  blockNumber: i,
-                  l2TxHash: txHash
-                });
+                depositsDetected++;
+              } catch (receiptError) {
+                // Continue even if receipt fetch fails
+                console.error(`  ❌ Error processing type 105 tx: ${receiptError.message}`);
               }
             }
-          } catch (txError) {
-            continue;
-          }
-        }
-      }
 
-      if ((i - startBlock + 1) % 100 === 0) {
-        console.log(`  Processed ${i - startBlock + 1} blocks...`);
+            // Detect ERC-20 token bridge deposits (L1 gateway transactions - rare in L2 blocks)
+            // Check if transaction is to any token gateway
+            if (l1Config?.erc20Tokens && tx.to) {
+              for (const token of l1Config.erc20Tokens) {
+                if (token.gateway && tx.to.toLowerCase() === token.gateway.toLowerCase()) {
+                  // This is a gateway transaction - parse amount from calldata
+                  try {
+                    const amount = await parseGatewayTransaction(tx, token);
+
+                    await BridgeActivityCollection.insertAsync({
+                      txHash: txHash,
+                      type: 'erc20_bridge',
+                      asset: token.symbol,
+                      tokenAddress: token.l1Address,
+                      from: tx.from.toLowerCase(),
+                      to: tx.to.toLowerCase(),
+                      value: amount, // ← Parsed from transaction data!
+                      timestamp: blockTimestamp,
+                      blockNumber: blockNumber,
+                      l2TxHash: txHash
+                    });
+                  } catch (tokenError) {
+                    // Continue on error
+                  }
+                  break;
+                }
+              }
+            }
+
+            // Detect withdrawals (L2→L1)
+            const ARBSYS_ADDRESS = '0x0000000000000000000000000000000000000064';
+
+            // ETH withdrawals - transactions to ArbSys with value
+            if (tx.to && tx.to.toLowerCase() === ARBSYS_ADDRESS && tx.value && Number(tx.value) > 0) {
+              await BridgeActivityCollection.insertAsync({
+                txHash: txHash,
+                type: 'withdrawal',
+                asset: 'ETH',
+                from: tx.from.toLowerCase(),
+                to: ARBSYS_ADDRESS,
+                value: Number(tx.value) / 1e18,
+                timestamp: blockTimestamp,
+                blockNumber: blockNumber,
+                l2TxHash: txHash
+              });
+            }
+
+            // ERC-20 withdrawals - check for transactions to L2 gateway contracts
+            if (l1Config?.erc20Tokens && tx.to) {
+              for (const token of l1Config.erc20Tokens) {
+                if (token.l2Gateway && tx.to.toLowerCase() === token.l2Gateway.toLowerCase()) {
+                  // Transaction to L2 gateway - likely a withdrawal
+                  // Check receipt for token transfer events
+                  try {
+                    const receipt = await provider.getTransactionReceipt(txHash);
+                    const TRANSFER_EVENT = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+                    if (receipt && receipt.logs) {
+                      for (const log of receipt.logs) {
+                        if (log.topics[0] === TRANSFER_EVENT &&
+                            log.address.toLowerCase() === token.l2Address.toLowerCase()) {
+                          // Parse withdrawal amount
+                          const { ethers } = await import('ethers');
+                          const amount = ethers.BigNumber.from(log.data);
+                          const tokenAmount = Number(amount) / Math.pow(10, token.decimals);
+
+                          await BridgeActivityCollection.insertAsync({
+                            txHash: txHash,
+                            type: 'withdrawal',
+                            asset: token.symbol,
+                            tokenAddress: token.l2Address,
+                            from: tx.from.toLowerCase(),
+                            to: tx.to.toLowerCase(),
+                            value: tokenAmount,
+                            timestamp: blockTimestamp,
+                            blockNumber: blockNumber,
+                            l2TxHash: txHash
+                          });
+                          break;
+                        }
+                      }
+                    }
+                  } catch (withdrawalError) {
+                    // Continue on error
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        } catch (txError) {
+          continue;
+        }
       }
     }
 
-    console.log(`✅ Processed ${currentBlock - startBlock + 1} new blocks, added ${addressesAdded} address activities`);
-    return currentBlock - startBlock + 1;
+    return { addressesAdded, depositsDetected };
   } catch (error) {
-    console.error('Error processing new blocks:', error.message);
-    return 0;
+    console.error(`Error processing block ${blockNumber}:`, error.message);
+    return { addressesAdded: 0, depositsDetected: 0 };
   }
 }
 
@@ -526,8 +729,239 @@ export async function getTVL() {
   }
 }
 
+// Minimal ERC-20 ABI for balance queries
+const ERC20_ABI = [
+  'function balanceOf(address owner) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)'
+];
+
+// Arbitrum Gateway ABI for parsing bridge transactions
+const GATEWAY_ABI = [
+  'function outboundTransfer(address _token, address _to, uint256 _amount, uint256 _maxGas, uint256 _gasPriceBid, bytes _data) payable returns (bytes)',
+  'function finalizeInboundTransfer(address _token, address _from, address _to, uint256 _amount, bytes _data) payable'
+];
+
 /**
- * Update Total Value Locked (TVL) by querying L1 bridge
+ * Parse ERC-20 token amount from gateway transaction
+ * Returns amount in token units (not wei)
+ */
+async function parseGatewayTransaction(tx, token) {
+  try {
+    const { ethers } = await import('ethers');
+
+    if (!tx.data || tx.data === '0x') {
+      return 0;
+    }
+
+    // Create interface for decoding
+    const iface = new ethers.utils.Interface(GATEWAY_ABI);
+
+    try {
+      // Try to decode as outboundTransfer (L1→L2 deposit)
+      const decoded = iface.parseTransaction({ data: tx.data });
+
+      if (decoded.name === 'outboundTransfer') {
+        // Extract amount parameter (3rd parameter, index 2)
+        const amountWei = decoded.args._amount || decoded.args[2];
+
+        if (amountWei) {
+          // Convert from wei/token units to actual amount
+          const amount = Number(amountWei) / Math.pow(10, token.decimals);
+          return amount;
+        }
+      } else if (decoded.name === 'finalizeInboundTransfer') {
+        // This is a withdrawal finalization
+        const amountWei = decoded.args._amount || decoded.args[3];
+
+        if (amountWei) {
+          const amount = Number(amountWei) / Math.pow(10, token.decimals);
+          return amount;
+        }
+      }
+    } catch (decodeError) {
+      // Not a recognized gateway method
+      return 0;
+    }
+
+    return 0;
+  } catch (error) {
+    console.error('Error parsing gateway transaction:', error.message);
+    return 0;
+  }
+}
+
+/**
+ * Get token price in USD from configured price API
+ */
+async function getTokenPrice(symbol, retryCount = 0) {
+  const MAX_RETRIES = 2;
+
+  try {
+    const hppSettings = Meteor.settings.hpp;
+    const priceApi = hppSettings?.priceApi;
+
+    if (!priceApi) {
+      console.warn('Price API not configured in settings');
+      return null;
+    }
+
+    const tokenId = priceApi.tokenIds?.[symbol];
+    if (!tokenId) {
+      // Token not mapped or explicitly set to null
+      return null;
+    }
+
+    // Support different price API providers
+    if (priceApi.provider === 'coingecko') {
+      const url = `${priceApi.baseUrl}?ids=${tokenId}&vs_currencies=usd`;
+
+      if (retryCount === 0) {
+        console.log(`Fetching ${symbol} price from CoinGecko (tokenId: ${tokenId})...`);
+      }
+
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        // Log the error response body for debugging
+        let errorBody = '';
+        try {
+          errorBody = await response.text();
+        } catch (e) {
+          errorBody = '(could not read error body)';
+        }
+
+        // Handle 429 rate limiting with retry
+        if (response.status === 429 && retryCount < MAX_RETRIES) {
+          const retryAfter = response.headers.get('retry-after');
+          const waitSeconds = retryAfter ? parseInt(retryAfter) : 30;
+
+          console.warn(`⚠️  Rate limited fetching ${symbol} price (${response.status}). Waiting ${waitSeconds}s before retry ${retryCount + 1}/${MAX_RETRIES}...`);
+          console.warn(`   URL: ${url}`);
+          console.warn(`   Response: ${errorBody}`);
+          await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+
+          return await getTokenPrice(symbol, retryCount + 1);
+        }
+
+        console.error(`❌ Failed to fetch ${symbol} price: ${response.status} ${response.statusText}`);
+        console.error(`   URL: ${url}`);
+        console.error(`   Response: ${errorBody}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const price = data[tokenId]?.usd || null;
+
+      if (price) {
+        console.log(`✅ ${symbol} price: $${price}`);
+      } else {
+        console.warn(`⚠️  ${symbol} price not found in response:`, JSON.stringify(data));
+      }
+
+      return price;
+    } else if (priceApi.provider === 'custom') {
+      // For custom API, expect direct URL with {symbol} placeholder
+      const url = priceApi.baseUrl.replace('{symbol}', symbol).replace('{tokenId}', tokenId);
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        console.warn(`Failed to fetch price for ${symbol} from custom API`);
+        return null;
+      }
+
+      const data = await response.json();
+      // Custom API should return { price: <usd_value> } or configure jsonPath in settings
+      return data.price || data.usd || null;
+    }
+
+    console.warn(`Unsupported price API provider: ${priceApi.provider}`);
+    return null;
+  } catch (error) {
+    console.error(`Error fetching price for ${symbol}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Get historical prices for a token from CoinGecko (free tier)
+ * Returns a map of date strings to prices
+ */
+async function getHistoricalPrices(symbol, days = 7, retryCount = 0) {
+  const MAX_RETRIES = 3;
+
+  try {
+    const hppSettings = Meteor.settings.hpp;
+    const priceApi = hppSettings?.priceApi;
+
+    if (!priceApi || priceApi.provider !== 'coingecko') {
+      console.warn('Historical prices only supported for CoinGecko provider');
+      return null;
+    }
+
+    const tokenId = priceApi.tokenIds?.[symbol];
+    if (!tokenId) {
+      return null;
+    }
+
+    // Use free market_chart endpoint
+    const url = `https://api.coingecko.com/api/v3/coins/${tokenId}/market_chart?vs_currency=usd&days=${days}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unable to read error response');
+      const retryAfter = response.headers.get('retry-after');
+      const rateLimitReset = response.headers.get('x-ratelimit-reset');
+
+      console.warn(`Failed to fetch historical prices for ${symbol}: ${response.status} ${response.statusText}`);
+      console.warn(`  URL: ${url}`);
+      console.warn(`  Response: ${errorText.substring(0, 200)}`);
+
+      // Handle 429 rate limiting with retry
+      if (response.status === 429 && retryAfter && retryCount < MAX_RETRIES) {
+        const waitSeconds = parseInt(retryAfter);
+        console.warn(`  Rate limited. Waiting ${waitSeconds} seconds before retry ${retryCount + 1}/${MAX_RETRIES}...`);
+
+        // Wait for the specified retry-after period
+        await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+
+        // Retry the request
+        return await getHistoricalPrices(symbol, days, retryCount + 1);
+      }
+
+      if (retryAfter) {
+        console.warn(`  Retry-After: ${retryAfter} seconds`);
+      }
+      if (rateLimitReset) {
+        const resetTime = new Date(parseInt(rateLimitReset) * 1000);
+        console.warn(`  Rate Limit Resets: ${resetTime.toISOString()}`);
+      }
+      return null;
+    }
+
+    const data = await response.json();
+
+    // Convert to map: date string -> price
+    const priceMap = new Map();
+    for (const [timestamp, price] of data.prices) {
+      const date = new Date(timestamp);
+      const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD
+
+      // Use the price closest to midnight for each day
+      if (!priceMap.has(dateStr)) {
+        priceMap.set(dateStr, price);
+      }
+    }
+
+    return priceMap;
+  } catch (error) {
+    console.error(`Error fetching historical prices for ${symbol}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Update Total Value Locked (TVL) by querying L1 bridge and token balances
  * Slow version - queries L1 bridge contract (should be called by background jobs only)
  */
 export async function updateTVL() {
@@ -542,32 +976,98 @@ export async function updateTVL() {
       return await getTVL(); // Return cached data on error
     }
 
-    // Connect to L1 (Sepolia) - ethers v5 syntax
+    // Connect to L1 - ethers v5 syntax
     const l1Provider = new ethers.providers.JsonRpcProvider(l1Config.rpcEndpoint);
 
-    // Query ETH balance of bridge contract on L1
-    const bridgeBalance = await l1Provider.getBalance(l1Config.bridgeContract);
-
-    // Convert from wei to ETH
-    const tvlInETH = Number(bridgeBalance) / 1e18;
-
-    // Get current ETH price and calculate USD value
+    // Get current ETH price
     const ethPrice = await getEthPrice();
-    const tvlInUSD = tvlInETH * ethPrice;
 
-    console.log(`✅ Bridge TVL: ${tvlInETH.toFixed(4)} ETH ($${tvlInUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}) (locked in L1 bridge)`);
+    // 1. Query ETH balance of bridge contract on L1
+    const bridgeBalance = await l1Provider.getBalance(l1Config.bridgeContract);
+    const ethAmount = Number(bridgeBalance) / 1e18;
+    const ethValueUSD = ethAmount * ethPrice;
+
+    let totalTvlUSD = ethValueUSD;
+    let totalTvlETH = ethAmount; // ETH equivalent
+    const tokenBreakdown = [
+      {
+        symbol: 'ETH',
+        amount: ethAmount,
+        valueUSD: ethValueUSD,
+        price: ethPrice
+      }
+    ];
+
+    // 2. Query ERC-20 token balances
+    if (l1Config.erc20Tokens && l1Config.erc20Tokens.length > 0) {
+      for (const token of l1Config.erc20Tokens) {
+        try {
+          // Skip if no L1 address (L2-only tokens)
+          if (!token.l1Address) continue;
+
+          const tokenContract = new ethers.Contract(
+            token.l1Address,
+            ERC20_ABI,
+            l1Provider
+          );
+
+          // Query balance in gateway (if specified) or bridge contract
+          const balanceTarget = token.gateway || l1Config.bridgeContract;
+          console.log(`  Querying ${token.symbol} balance at ${balanceTarget}...`);
+          const balance = await tokenContract.balanceOf(balanceTarget);
+          const amount = Number(balance) / Math.pow(10, token.decimals);
+          console.log(`  Raw balance: ${balance.toString()}, Amount: ${amount}`);
+
+          // Get token price
+          const price = await getTokenPrice(token.symbol);
+
+          let valueUSD = null;
+          if (price) {
+            valueUSD = amount * price;
+            totalTvlUSD += valueUSD;
+
+            // Convert to ETH equivalent
+            const ethEquivalent = valueUSD / ethPrice;
+            totalTvlETH += ethEquivalent;
+          }
+
+          tokenBreakdown.push({
+            symbol: token.symbol,
+            name: token.name,
+            amount,
+            valueUSD,
+            price
+          });
+
+          // Log token balance with appropriate message
+          if (amount === 0) {
+            console.log(`  ${token.symbol}: ${amount.toFixed(4)} (no balance)`);
+          } else if (price) {
+            console.log(`  ${token.symbol}: ${amount.toFixed(4)} ($${valueUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})})`);
+          } else {
+            console.log(`  ${token.symbol}: ${amount.toFixed(4)} (price unavailable)`);
+          }
+        } catch (tokenError) {
+          console.error(`Error querying ${token.symbol}:`, tokenError.message);
+        }
+      }
+    }
+
+    console.log(`✅ Total Bridge TVL: $${totalTvlUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
 
     // Store snapshot in database
     await TvlCollection.insertAsync({
       timestamp: new Date(),
-      tvlInETH,
-      tvlInUSD,
+      tvlInETH: totalTvlETH,
+      tvlInUSD: totalTvlUSD,
+      tokenBreakdown,
       updatedAt: new Date()
     });
 
     return {
-      tvlInETH,
-      tvlInUSD,
+      tvlInETH: totalTvlETH,
+      tvlInUSD: totalTvlUSD,
+      tokenBreakdown,
       updatedAt: new Date()
     };
   } catch (error) {
@@ -641,40 +1141,55 @@ export async function calculateBridgeVolume() {
     const now = new Date();
     const twentyFourHoursAgo = new Date(now - 24 * 60 * 60 * 1000);
 
-    // Get withdrawals in last 24h (these have actual ETH values)
+    // Get all bridge activity in last 24h
     const withdrawals = await BridgeActivityCollection.find({
       type: 'withdrawal',
       timestamp: { $gte: twentyFourHoursAgo }
     }).fetchAsync();
 
-    // Get deposits in last 24h (now includes actual ETH values from internal txs)
-    const deposits = await BridgeActivityCollection.find({
+    const ethDeposits = await BridgeActivityCollection.find({
       type: 'deposit',
       timestamp: { $gte: twentyFourHoursAgo }
     }).fetchAsync();
 
-    // Calculate total withdrawal value in ETH
-    const totalWithdrawalsETH = withdrawals.reduce((sum, w) => sum + w.value, 0);
+    const erc20Deposits = await BridgeActivityCollection.find({
+      type: 'erc20_bridge',
+      timestamp: { $gte: twentyFourHoursAgo }
+    }).fetchAsync();
 
-    // Calculate total deposit value in ETH
-    const totalDepositsETH = deposits.reduce((sum, d) => sum + d.value, 0);
-
-    // Get ETH price for USD conversion
+    // Get ETH price for conversions
     const ethPrice = await getEthPrice();
 
-    // Total volume is deposits + withdrawals
-    const totalVolumeETH = totalDepositsETH + totalWithdrawalsETH;
-    const volumeUSD = totalVolumeETH * ethPrice;
+    // Calculate ETH deposits/withdrawals
+    const totalWithdrawalsETH = withdrawals.reduce((sum, w) => sum + w.value, 0);
+    const totalEthDepositsETH = ethDeposits.reduce((sum, d) => sum + d.value, 0);
 
-    console.log(`✅ Bridge volume (24h): ${deposits.length} deposits (${totalDepositsETH.toFixed(4)} ETH), ${withdrawals.length} withdrawals (${totalWithdrawalsETH.toFixed(4)} ETH) = $${volumeUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
+    // Calculate total USD volume
+    let totalVolumeUSD = (totalEthDepositsETH + totalWithdrawalsETH) * ethPrice;
+
+    // Add ERC-20 token volume
+    let erc20VolumeUSD = 0;
+    for (const deposit of erc20Deposits) {
+      const price = await getTokenPrice(deposit.asset);
+      if (price && deposit.value) {
+        const valueUSD = deposit.value * price;
+        erc20VolumeUSD += valueUSD;
+        totalVolumeUSD += valueUSD;
+      }
+    }
+
+    const totalDeposits = ethDeposits.length + erc20Deposits.length;
+
+    console.log(`✅ Bridge volume (24h): ${totalDeposits} deposits (${totalEthDepositsETH.toFixed(4)} ETH + ${erc20Deposits.length} tokens), ${withdrawals.length} withdrawals (${totalWithdrawalsETH.toFixed(4)} ETH) = $${totalVolumeUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
 
     return {
-      depositCount: deposits.length,
+      depositCount: totalDeposits,
       withdrawalCount: withdrawals.length,
-      depositsETH: totalDepositsETH,
+      depositsETH: totalEthDepositsETH,
       withdrawalsETH: totalWithdrawalsETH,
-      totalVolumeETH,
-      volumeUSD,
+      erc20VolumeUSD,
+      totalVolumeETH: totalEthDepositsETH + totalWithdrawalsETH,
+      volumeUSD: totalVolumeUSD,
       ethPrice
     };
   } catch (error) {
@@ -938,35 +1453,109 @@ export async function backfillWeeklyActiveAddressHistory(days = 7) {
  */
 export async function backfillTvlHistory(days = 7) {
   try {
-    // Get current TVL
+    const { ethers } = await import('ethers');
+
+    // Get current TVL for token breakdown
     const currentTvl = await getTVL();
     if (!currentTvl || currentTvl.tvlInETH === 0) {
       console.log('⚠️  No current TVL data to backfill');
       return 0;
     }
 
+    // Get L1 configuration
+    const networkConfig = getActiveNetworkConfig();
+    const l1Config = networkConfig.l1;
+    if (!l1Config || !l1Config.rpcEndpoint) {
+      console.error('L1 configuration missing in settings');
+      return 0;
+    }
+
+    // Fetch historical prices for all tokens (free tier supports up to 365 days)
+    console.log('📊 Fetching historical prices...');
+    const ethPriceHistory = await getHistoricalPrices('WETH', Math.max(days, 7));
+
+    // Rate limit: wait 2 seconds after ETH price fetch
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    const tokenPriceHistories = new Map();
+    if (l1Config.erc20Tokens) {
+      for (const token of l1Config.erc20Tokens) {
+        if (token.l1Address) {
+          const history = await getHistoricalPrices(token.symbol, Math.max(days, 7));
+          if (history) {
+            tokenPriceHistories.set(token.symbol, history);
+          }
+          // Rate limit: wait 2 seconds between requests to avoid 429 errors
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
     const now = new Date();
     let snapshotsCreated = 0;
 
-    // Create snapshots for each of the last N days using current TVL value
+    // Get price from 7 days ago as fallback for older dates
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const fallbackDateStr = sevenDaysAgo.toISOString().split('T')[0];
+    const fallbackEthPrice = ethPriceHistory?.get(fallbackDateStr) || await getEthPrice();
+
+    // Create snapshots for each of the last N days with historical prices
     for (let i = 0; i < days; i++) {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       date.setHours(12, 0, 0, 0); // Noon
 
-      // Store snapshot with current TVL value
+      const dateStr = date.toISOString().split('T')[0];
+
+      // Get ETH price for this date (use fallback if beyond 7 days)
+      const ethPrice = ethPriceHistory?.get(dateStr) || fallbackEthPrice;
+
+      // Use current token balances (simplified - could query historical if needed)
+      const tokenBreakdown = currentTvl.tokenBreakdown || [];
+
+      // Recalculate TVL with historical prices
+      let totalTvlUSD = 0;
+      const historicalBreakdown = [];
+
+      for (const token of tokenBreakdown) {
+        let price = token.price; // Default to current price
+
+        if (token.symbol === 'ETH') {
+          price = ethPrice;
+        } else {
+          const history = tokenPriceHistories.get(token.symbol);
+          price = history?.get(dateStr) || history?.get(fallbackDateStr) || token.price;
+        }
+
+        const valueUSD = price ? token.amount * price : null;
+        if (valueUSD) {
+          totalTvlUSD += valueUSD;
+        }
+
+        historicalBreakdown.push({
+          ...token,
+          price,
+          valueUSD
+        });
+      }
+
+      const totalTvlETH = totalTvlUSD / ethPrice;
+
+      // Store snapshot
       await TvlCollection.insertAsync({
         timestamp: date,
-        tvlInETH: currentTvl.tvlInETH,
-        tvlInUSD: currentTvl.tvlInUSD,
+        tvlInETH: totalTvlETH,
+        tvlInUSD: totalTvlUSD,
+        tokenBreakdown: historicalBreakdown,
         updatedAt: new Date()
       });
 
       snapshotsCreated++;
-      console.log(`  Created TVL snapshot for ${date.toDateString()}: ${currentTvl.tvlInETH.toFixed(4)} ETH`);
+      console.log(`  Created TVL snapshot for ${date.toDateString()}: ${totalTvlETH.toFixed(4)} ETH ($${totalTvlUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})})`);
     }
 
-    console.log(`✅ Backfilled ${snapshotsCreated} TVL snapshots (using current value)`);
+    console.log(`✅ Backfilled ${snapshotsCreated} TVL snapshots with historical prices`);
     return snapshotsCreated;
   } catch (error) {
     console.error('Error backfilling TVL history:', error.message);
@@ -981,13 +1570,13 @@ export async function backfillTvlHistory(days = 7) {
  * - Bridge deposits (type 105 transactions)
  * - Bridge withdrawals (ArbSys precompile calls)
  *
- * Respects settings.hpp.backfill.bridgeActivity configuration:
+ * Respects settings.hpp.backfill.historicalData configuration:
  * - blockCount: -1 = scan from genesis, 0 = skip backfill, >0 = scan last N blocks
  */
-export async function backfillBridgeActivity() {
+export async function backfillHistoricalData() {
   try {
     // Check if backfill is enabled
-    const backfillConfig = Meteor.settings.hpp?.backfill?.bridgeActivity;
+    const backfillConfig = Meteor.settings.hpp?.backfill?.historicalData;
     if (!backfillConfig?.enabled) {
       console.log('⚠️  KPI backfill is disabled in settings');
       return { addressesAdded: 0, depositsFound: 0, withdrawalsFound: 0, blocksScanned: 0 };
@@ -999,135 +1588,28 @@ export async function backfillBridgeActivity() {
       return { addressesAdded: 0, depositsFound: 0, withdrawalsFound: 0, blocksScanned: 0 };
     }
 
+    // Calculate start block based on settings
     const provider = getProvider();
-    const ARBSYS_ADDRESS = '0x0000000000000000000000000000000000000064';
+    const currentBlock = await provider.getBlockNumber();
 
-    // Determine start and end blocks
     let startBlock;
-    let endBlock;
-
     if (blockCount === -1) {
-      // Scan from genesis (or resume from last processed block)
-      endBlock = await provider.getBlockNumber();
-
-      // Check if we have any existing address activity data
-      const lastProcessed = await AddressActivityCollection.findOneAsync(
-        {},
-        { sort: { blockNumber: -1 }, limit: 1 }
-      );
-
-      if (lastProcessed && lastProcessed.blockNumber > 1) {
-        startBlock = lastProcessed.blockNumber + 1;
-        console.log(`📍 Resuming backfill from block ${startBlock} to ${endBlock}...`);
-        console.log(`   (Previously processed up to block ${lastProcessed.blockNumber})`);
-      } else {
-        startBlock = 1;
-        console.log(`🔍 Backfilling all KPIs from genesis (block 1) to current block ${endBlock}...`);
-      }
+      startBlock = 1; // Scan from genesis
     } else {
-      // Scan last N blocks (always fresh scan, no resume)
-      endBlock = await provider.getBlockNumber();
-      startBlock = Math.max(1, endBlock - blockCount + 1);
-      console.log(`🔍 Backfilling all KPIs for last ${blockCount} blocks (${startBlock} to ${endBlock})...`);
+      startBlock = Math.max(1, currentBlock - blockCount + 1);
     }
 
-    const totalBlocks = endBlock - startBlock + 1;
+    console.log(`🔍 Backfilling all KPIs for last ${blockCount} blocks (${startBlock} to ${currentBlock})...`);
 
-    let addressesAdded = 0;
-    let depositsFound = 0;
-    let withdrawalsFound = 0;
+    // Use the optimized parallel processNewBlocks() with specified start block
+    const addressesAdded = await processNewBlocks(startBlock);
 
-    // Scan blocks and collect ALL KPI data in a single pass
-    for (let i = startBlock; i <= endBlock; i++) {
-      try {
-        const block = await provider.getBlock(i);
-
-        if (block && block.transactions && block.transactions.length > 0) {
-          const blockTimestamp = block.timestamp ? new Date(block.timestamp * 1000) : new Date();
-
-          for (const txHash of block.transactions) {
-            try {
-              const tx = await provider.getTransaction(txHash);
-
-              if (!tx || !tx.from) continue;
-
-              // 1. Record address activity (for weekly active addresses)
-              try {
-                await AddressActivityCollection.insertAsync({
-                  address: tx.from.toLowerCase(),
-                  timestamp: blockTimestamp,
-                  blockNumber: i
-                });
-                addressesAdded++;
-              } catch (addressError) {
-                // Might already exist, continue
-              }
-
-              // 2. Detect bridge deposits (type 105)
-              if (tx.type === 105) {
-                try {
-                  const existing = await BridgeActivityCollection.findOneAsync({ txHash });
-                  if (!existing) {
-                    // Fetch deposit amount from internal transactions
-                    const depositAmount = await fetchDepositAmount(txHash);
-
-                    await BridgeActivityCollection.insertAsync({
-                      txHash: txHash,
-                      type: 'deposit',
-                      from: tx.from.toLowerCase(),
-                      to: tx.to ? tx.to.toLowerCase() : null,
-                      value: depositAmount, // Fetched from internal transactions
-                      timestamp: blockTimestamp,
-                      blockNumber: i,
-                      l2TxHash: txHash
-                    });
-                    depositsFound++;
-                  }
-                } catch (depositError) {
-                  // Continue on error
-                }
-              }
-
-              // 3. Detect withdrawals (to ArbSys)
-              if (tx.to && tx.to.toLowerCase() === ARBSYS_ADDRESS && tx.value && Number(tx.value) > 0) {
-                try {
-                  const existing = await BridgeActivityCollection.findOneAsync({ txHash });
-                  if (!existing) {
-                    await BridgeActivityCollection.insertAsync({
-                      txHash: txHash,
-                      type: 'withdrawal',
-                      from: tx.from.toLowerCase(),
-                      to: ARBSYS_ADDRESS,
-                      value: Number(tx.value) / 1e18,
-                      timestamp: blockTimestamp,
-                      blockNumber: i,
-                      l2TxHash: txHash
-                    });
-                    withdrawalsFound++;
-                  }
-                } catch (withdrawalError) {
-                  // Continue on error
-                }
-              }
-            } catch (txError) {
-              // Skip transactions that fail to fetch
-              continue;
-            }
-          }
-        }
-
-        // Progress update every 100 blocks
-        if ((i - startBlock + 1) % 100 === 0) {
-          console.log(`  Scanned ${i - startBlock + 1}/${totalBlocks} blocks... (${addressesAdded} addresses, ${depositsFound} deposits, ${withdrawalsFound} withdrawals)`);
-        }
-      } catch (blockError) {
-        // Skip blocks that fail to fetch
-        continue;
-      }
-    }
-
-    console.log(`✅ Backfill complete: ${addressesAdded} addresses, ${depositsFound} deposits, ${withdrawalsFound} withdrawals across ${totalBlocks} blocks`);
-    return { addressesAdded, depositsFound, withdrawalsFound, blocksScanned: totalBlocks };
+    return {
+      addressesAdded,
+      depositsFound: 0, // processNewBlocks handles this internally
+      withdrawalsFound: 0,
+      blocksScanned: addressesAdded
+    };
   } catch (error) {
     console.error('Error backfilling KPI data:', error.message);
     return { addressesAdded: 0, depositsFound: 0, withdrawalsFound: 0, blocksScanned: 0 };

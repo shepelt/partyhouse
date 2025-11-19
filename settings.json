@@ -1,13 +1,24 @@
 {
   "public": {
-    "networkName": "HPP Sepolia"
+    "blockExplorer": "https://explorer.hpp.io",
+    "networkName": "HPP Mainnet"
   },
   "hpp": {
-    "activeNetwork": "sepolia",
+    "activeNetwork": "mainnet",
+    "priceApi": {
+      "provider": "coingecko",
+      "baseUrl": "https://api.coingecko.com/api/v3/simple/price",
+      "tokenIds": {
+        "HPP": "aergo",
+        "WETH": "weth",
+        "USDC.e": "usd-coin",
+        "USDC": "usd-coin"
+      }
+    },
     "backfill": {
-      "bridgeActivity": {
+      "historicalData": {
         "enabled": true,
-        "blockCount": -1
+        "blockCount": 10080
       }
     },
     "networks": {
@@ -21,8 +32,33 @@
         "l1": {
           "chainId": 1,
           "rpcEndpoint": "https://ethereum-rpc.publicnode.com",
-          "bridgeContract": "TBD",
-          "inboxContract": "TBD"
+          "bridgeContract": "0x9948edfbb9e0b104bad60393dbe79d0bc7937014",
+          "inboxContract": "0xE0400a87d5Ee8a2Fc1dF2aAf4B6d8f89d0B9bE55",
+          "erc20Tokens": [
+            {
+              "name": "HousePartyProtocol",
+              "symbol": "HPP",
+              "l1Address": "0xe33fbE7584EB79e2673abe576B7AC8C0De62565c",
+              "l2Address": "0xB48334E7938367bC24Fe1F19000D6f06C622E6c7",
+              "gateway": "0x8F31c7a6806432F05A936Ade26a7407c968f13eA",
+              "decimals": 18
+            },
+            {
+              "name": "Wrapped Ether",
+              "symbol": "WETH",
+              "l1Address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+              "l2Address": "0x82553CDA0bEd9262a879F9F7524cd20288B357AA",
+              "gateway": "0x8f10926536478dabff58A748C54385a346830546",
+              "l2Gateway": "0x2cb68758b5aFbB961B685B4BE8ba04DcB04B6f07",
+              "decimals": 18
+            },
+            {
+              "name": "USD Coin (Bridged)",
+              "symbol": "USDC.e",
+              "l2Address": "0x401eCb1D350407f13ba348573E5630B83638E30D",
+              "decimals": 6
+            }
+          ]
         }
       },
       "sepolia": {
@@ -36,7 +72,29 @@
           "chainId": 11155111,
           "rpcEndpoint": "https://ethereum-sepolia-rpc.publicnode.com",
           "bridgeContract": "0x1DDe0F57E7889B6866505634E58E3057b01dfed0",
-          "inboxContract": "0xAAD45a7bF65b43E56767CdE3Ab84A5433c714Afc"
+          "inboxContract": "0xAAD45a7bF65b43E56767CdE3Ab84A5433c714Afc",
+          "erc20Tokens": [
+            {
+              "name": "HousePartyProtocol",
+              "symbol": "HPP",
+              "l1Address": "0xB34e0d1fee60e078D611D4218AFB004b639C7b76",
+              "l2Address": "0x8ebCaf48D2D91b8CEcF1668A4519823881Bf8fc3",
+              "decimals": 18
+            },
+            {
+              "name": "Wrapped Ether",
+              "symbol": "WETH",
+              "l1Address": "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9",
+              "l2Address": "0xd96a3b90e8AbF45E758BA7a407B3f2d1a3b6f546",
+              "decimals": 18
+            },
+            {
+              "name": "USD Coin (Bridged)",
+              "symbol": "USDC.e",
+              "l2Address": "0x401eCb1D350407f13ba348573E5630B83638E30D",
+              "decimals": 6
+            }
+          ]
         }
       }
     }

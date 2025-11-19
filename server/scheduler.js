@@ -2,7 +2,7 @@ import { Meteor } from 'meteor/meteor';
 import {
   updateDailyTransactionCount,
   calculate24hTransactions,
-  calculateTVL,
+  updateTVL,
   calculateBridgeActivityFromTransactions,
   calculateBridgeVolume,
   updateWeeklyActiveAddresses
@@ -20,7 +20,7 @@ export async function startScheduledJobs() {
   try {
     await Promise.all([
       calculate24hTransactions(),
-      calculateTVL(),
+      updateTVL(),
       calculateBridgeActivityFromTransactions(),
       calculateBridgeVolume()
     ]);
@@ -33,7 +33,7 @@ export async function startScheduledJobs() {
   setInterval(async () => {
     try {
       console.log('⏰ Running scheduled TVL update...');
-      await calculateTVL();
+      await updateTVL();
     } catch (error) {
       console.error('❌ Error in scheduled TVL update:', error.message);
     }
@@ -88,6 +88,33 @@ export async function startScheduledJobs() {
       console.error('❌ Error in scheduled weekly active addresses update:', error.message);
     }
   }, 15 * 60 * 1000); // 15 minutes
+
+  // Schedule historical TVL backfill once per day (runs 5 min after startup, then daily at 3 AM)
+  setTimeout(async () => {
+    console.log('📊 Running delayed TVL historical backfill (avoiding startup rate limits)...');
+    try {
+      const { backfillTvlHistory } = await import('./kpis.js');
+      await backfillTvlHistory(7);
+      console.log('✅ TVL historical backfill complete');
+    } catch (error) {
+      console.error('❌ TVL historical backfill failed:', error.message);
+    }
+
+    // Then run daily at 3 AM
+    setInterval(async () => {
+      const now = new Date();
+      if (now.getHours() === 3 && now.getMinutes() < 15) {
+        console.log('📊 Running daily TVL historical backfill...');
+        try {
+          const { backfillTvlHistory } = await import('./kpis.js');
+          await backfillTvlHistory(7);
+          console.log('✅ Daily TVL historical backfill complete');
+        } catch (error) {
+          console.error('❌ Daily TVL historical backfill failed:', error.message);
+        }
+      }
+    }, 15 * 60 * 1000); // Check every 15 minutes
+  }, 5 * 60 * 1000); // Initial delay: 5 minutes
 
   console.log('✅ Scheduled jobs started');
 }
