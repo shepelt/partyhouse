@@ -15,19 +15,18 @@ import {
 export async function startScheduledJobs() {
   console.log('🕐 Starting scheduled jobs...');
 
-  // Run all updates immediately on startup
-  console.log('🚀 Running initial KPI updates...');
-  try {
-    await Promise.all([
-      calculate24hTransactions(),
-      updateTVL(),
-      calculateBridgeActivityFromTransactions(),
-      calculateBridgeVolume()
-    ]);
+  // Run all updates immediately on startup (background - don't block)
+  console.log('🚀 Running initial KPI updates (background)...');
+  Promise.all([
+    calculate24hTransactions(),
+    updateTVL(),
+    calculateBridgeActivityFromTransactions(),
+    calculateBridgeVolume()
+  ]).then(() => {
     console.log('✅ Initial KPI updates complete');
-  } catch (error) {
+  }).catch(error => {
     console.error('❌ Error in initial KPI updates:', error.message);
-  }
+  });
 
   // Update TVL every 5 minutes
   setInterval(async () => {

@@ -39,3 +39,19 @@ export const TransactionsCollection = new Mongo.Collection('transactions');
  * Document: { address, timestamp, blockNumber }
  */
 export const AddressActivityCollection = new Mongo.Collection('addressActivity');
+
+/**
+ * Bridge Metrics Collection
+ * Stores pre-calculated bridge activity and volume metrics (24h)
+ * Updated by scheduled jobs, read by frontend methods (no price fetching on read)
+ * Document: {
+ *   timestamp,
+ *   depositCount,
+ *   withdrawalCount,
+ *   deposits (ETH),
+ *   withdrawals (ETH),
+ *   volumeUSD,
+ *   updatedAt
+ * }
+ */
+export const BridgeMetricsCollection = new Mongo.Collection('bridgeMetrics');

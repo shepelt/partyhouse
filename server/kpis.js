@@ -5,7 +5,8 @@ import {
   WeeklyActiveAddressesCollection,
   AddressActivityCollection,
   TvlCollection,
-  BridgeActivityCollection
+  BridgeActivityCollection,
+  BridgeMetricsCollection
 } from '../imports/api/collections.js';
 
 // Cache ETH price for 5 minutes to avoid rate limiting
@@ -1055,14 +1056,50 @@ export async function updateTVL() {
 
     console.log(`✅ Total Bridge TVL: $${totalTvlUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
 
-    // Store snapshot in database
-    await TvlCollection.insertAsync({
-      timestamp: new Date(),
-      tvlInETH: totalTvlETH,
-      tvlInUSD: totalTvlUSD,
-      tokenBreakdown,
-      updatedAt: new Date()
-    });
+    // Check if any tokens with non-zero balances have null prices
+    const hasIncompletePricing = tokenBreakdown.some(token => token.amount > 0 && token.price === null);
+
+    if (hasIncompletePricing) {
+      console.warn('⚠️  Skipping TVL database update - some token prices unavailable (likely CoinGecko rate limit)');
+      console.warn('   Will retry on next scheduled update');
+    } else {
+      // Upsert daily TVL record (only if higher than existing)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      const existingRecord = await TvlCollection.findOneAsync({
+        timestamp: { $gte: today, $lt: tomorrow }
+      });
+
+      if (!existingRecord || totalTvlUSD > existingRecord.tvlInUSD) {
+        if (existingRecord) {
+          // Update existing record with higher value
+          await TvlCollection.updateAsync(existingRecord._id, {
+            $set: {
+              tvlInETH: totalTvlETH,
+              tvlInUSD: totalTvlUSD,
+              tokenBreakdown,
+              updatedAt: new Date()
+            }
+          });
+          console.log(`📊 Updated daily TVL record (higher value: $${totalTvlUSD.toLocaleString()})`);
+        } else {
+          // Insert new daily record
+          await TvlCollection.insertAsync({
+            timestamp: today,
+            tvlInETH: totalTvlETH,
+            tvlInUSD: totalTvlUSD,
+            tokenBreakdown,
+            updatedAt: new Date()
+          });
+          console.log(`📊 Created new daily TVL record: $${totalTvlUSD.toLocaleString()}`);
+        }
+      } else {
+        console.log(`📊 Daily TVL record unchanged (current: $${existingRecord.tvlInUSD.toLocaleString()}, new: $${totalTvlUSD.toLocaleString()})`);
+      }
+    }
 
     return {
       tvlInETH: totalTvlETH,
@@ -1182,16 +1219,25 @@ export async function calculateBridgeVolume() {
 
     console.log(`✅ Bridge volume (24h): ${totalDeposits} deposits (${totalEthDepositsETH.toFixed(4)} ETH + ${erc20Deposits.length} tokens), ${withdrawals.length} withdrawals (${totalWithdrawalsETH.toFixed(4)} ETH) = $${totalVolumeUSD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
 
-    return {
+    // Save to BridgeMetricsCollection for fast cached reads
+    const metrics = {
+      timestamp: now,
       depositCount: totalDeposits,
       withdrawalCount: withdrawals.length,
       depositsETH: totalEthDepositsETH,
       withdrawalsETH: totalWithdrawalsETH,
+      volumeUSD: totalVolumeUSD,
       erc20VolumeUSD,
       totalVolumeETH: totalEthDepositsETH + totalWithdrawalsETH,
-      volumeUSD: totalVolumeUSD,
-      ethPrice
+      ethPrice,
+      updatedAt: new Date()
     };
+
+    // Upsert (replace latest metrics)
+    await BridgeMetricsCollection.removeAsync({});  // Clear old data
+    await BridgeMetricsCollection.insertAsync(metrics);
+
+    return metrics;
   } catch (error) {
     console.error('Error calculating bridge volume:', error.message);
     return {
@@ -1513,6 +1559,11 @@ export async function backfillTvlHistory(days = 7) {
 
       // Use current token balances (simplified - could query historical if needed)
       const tokenBreakdown = currentTvl.tokenBreakdown || [];
+
+      // Skip if no token data
+      if (tokenBreakdown.length === 0) {
+        continue;
+      }
 
       // Recalculate TVL with historical prices
       let totalTvlUSD = 0;
@@ -1851,5 +1902,75 @@ export async function backfillDepositAmounts() {
   } catch (error) {
     console.error('Error in backfillDepositAmounts:', error.message);
     throw error;
+  }
+}
+
+/**
+ * Get cached bridge volume (no price fetching - fast!)
+ * Returns pre-calculated metrics from BridgeMetricsCollection
+ * Updated by scheduled calculateBridgeVolume() job
+ */
+export async function getBridgeVolume() {
+  try {
+    const latest = await BridgeMetricsCollection.findOneAsync({}, { sort: { timestamp: -1 } });
+    
+    if (!latest) {
+      console.warn('⚠️  No cached bridge volume data available');
+      return {
+        depositCount: 0,
+        withdrawalCount: 0,
+        volumeUSD: 0
+      };
+    }
+    
+    return {
+      depositCount: latest.depositCount,
+      withdrawalCount: latest.withdrawalCount,
+      depositsETH: latest.depositsETH,
+      withdrawalsETH: latest.withdrawalsETH,
+      volumeUSD: latest.volumeUSD,
+      erc20VolumeUSD: latest.erc20VolumeUSD,
+      totalVolumeETH: latest.totalVolumeETH,
+      ethPrice: latest.ethPrice
+    };
+  } catch (error) {
+    console.error('Error reading cached bridge volume:', error.message);
+    return {
+      depositCount: 0,
+      withdrawalCount: 0,
+      volumeUSD: 0
+    };
+  }
+}
+
+/**
+ * Get cached bridge activity (no price fetching - fast!)
+ * Returns pre-calculated activity from BridgeMetricsCollection
+ * Updated by scheduled calculateBridgeVolume() job
+ */
+export async function getBridgeActivity() {
+  try {
+    const latest = await BridgeMetricsCollection.findOneAsync({}, { sort: { timestamp: -1 } });
+    
+    if (!latest) {
+      console.warn('⚠️  No cached bridge activity data available');
+      return {
+        depositCount: 0,
+        withdrawalCount: 0
+      };
+    }
+    
+    return {
+      depositCount: latest.depositCount,
+      withdrawalCount: latest.withdrawalCount,
+      deposits: latest.depositsETH,
+      withdrawals: latest.withdrawalsETH
+    };
+  } catch (error) {
+    console.error('Error reading cached bridge activity:', error.message);
+    return {
+      depositCount: 0,
+      withdrawalCount: 0
+    };
   }
 }

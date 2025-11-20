@@ -71,13 +71,14 @@ Meteor.startup(async () => {
   }
 
   // Fetch initial KPI data (after backfill/processing)
-  console.log('🔄 Fetching initial KPI data...');
-  try {
-    await updateDailyTransactionCount();
-    await updateTVL();
-  } catch (error) {
+  console.log('🔄 Fetching initial KPI data (background)...');
+  // Run in background - don't block startup on price fetching
+  Promise.all([
+    updateDailyTransactionCount(),
+    updateTVL()
+  ]).catch(error => {
     console.error('❌ Initial KPI fetch failed:', error.message);
-  }
+  });
 
   // Check if we have enough historical data snapshots, if not, backfill
   try {

@@ -3,7 +3,8 @@ import {
   DailyTransactionsCollection,
   WeeklyActiveAddressesCollection,
   TvlCollection,
-  BridgeActivityCollection
+  BridgeActivityCollection,
+  BridgeMetricsCollection
 } from '../imports/api/collections.js';
 
 /**
@@ -60,12 +61,17 @@ Meteor.publish('tvl.latest', function() {
 });
 
 /**
- * Publish TVL history for last N records
+ * Publish TVL history for last N days
  */
 Meteor.publish('tvl.history', function(days = 7) {
-  return TvlCollection.find({}, {
-    sort: { timestamp: -1 },
-    limit: days
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+  startDate.setHours(0, 0, 0, 0);
+
+  return TvlCollection.find({
+    timestamp: { $gte: startDate }
+  }, {
+    sort: { timestamp: -1 }
   });
 });
 
@@ -79,4 +85,15 @@ Meteor.publish('bridgeActivity.recent', function() {
     { timestamp: { $gte: twentyFourHoursAgo } },
     { sort: { timestamp: -1 } }
   );
+});
+
+/**
+ * Publish the latest bridge metrics (volume & activity)
+ * Updated by scheduled jobs, consumed reactively by frontend
+ */
+Meteor.publish('bridgeMetrics.latest', function() {
+  return BridgeMetricsCollection.find({}, {
+    sort: { timestamp: -1 },
+    limit: 1
+  });
 });

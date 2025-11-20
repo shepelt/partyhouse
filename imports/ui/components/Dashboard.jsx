@@ -4,7 +4,8 @@ import { useTracker } from 'meteor/react-meteor-data';
 import {
   DailyTransactionsCollection,
   WeeklyActiveAddressesCollection,
-  TvlCollection
+  TvlCollection,
+  BridgeMetricsCollection
 } from '../../api/collections';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { TrendingUp, Users, DollarSign, ArrowUpDown } from 'lucide-react';
@@ -25,16 +26,12 @@ export const Dashboard = () => {
   // Network info state
   const [networkInfo, setNetworkInfo] = useState(null);
 
-  // Bridge-related state (still using methods as they're calculated values, not stored directly)
-  const [bridgeActivity, setBridgeActivity] = useState('---');
-  const [bridgeVolume, setBridgeVolume] = useState('---');
-  const [isLoadingBridge, setIsLoadingBridge] = useState(false);
-  const [isLoadingVolume, setIsLoadingVolume] = useState(false);
+  // Historical data for charts (fetched via methods since they need aggregation)
   const [bridgeActivityHistory, setBridgeActivityHistory] = useState([]);
   const [bridgeVolumeHistory, setBridgeVolumeHistory] = useState([]);
 
   // Reactive data from subscriptions
-  const { dailyTransactions, weeklyActiveAddresses, tvl, txHistory, addressHistory, tvlHistory, isLoading } = useTracker(() => {
+  const { dailyTransactions, weeklyActiveAddresses, tvl, bridgeActivity, bridgeVolume, txHistory, addressHistory, tvlHistory, isLoading, isLoadingBridge } = useTracker(() => {
     const days = 7;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
@@ -42,16 +39,19 @@ export const Dashboard = () => {
     const dailyTxSub = Meteor.subscribe('dailyTransactions.latest');
     const weeklyAddrSub = Meteor.subscribe('weeklyActiveAddresses.latest');
     const tvlSub = Meteor.subscribe('tvl.latest');
+    const bridgeMetricsSub = Meteor.subscribe('bridgeMetrics.latest');
     const txHistorySub = Meteor.subscribe('dailyTransactions.history', days);
     const addrHistorySub = Meteor.subscribe('weeklyActiveAddresses.history', days);
     const tvlHistorySub = Meteor.subscribe('tvl.history', days);
 
     const isLoading = !dailyTxSub.ready() || !weeklyAddrSub.ready() || !tvlSub.ready();
+    const isLoadingBridge = !bridgeMetricsSub.ready();
 
     // Get latest records
     const latestDailyTx = DailyTransactionsCollection.findOne({}, { sort: { updatedAt: -1 } });
     const latestWeeklyAddr = WeeklyActiveAddressesCollection.findOne({}, { sort: { updatedAt: -1 } });
     const latestTvl = TvlCollection.findOne({}, { sort: { timestamp: -1 } });
+    const latestBridgeMetrics = BridgeMetricsCollection.findOne({}, { sort: { timestamp: -1 } });
 
     // Get historical data (matching the publication filters)
     const txHistoryData = DailyTransactionsCollection.find(
@@ -62,10 +62,24 @@ export const Dashboard = () => {
       {},
       { sort: { updatedAt: -1 }, limit: days }
     ).fetch().reverse(); // Reverse to get chronological order
-    const tvlHistoryData = TvlCollection.find(
-      {},
-      { sort: { timestamp: -1 }, limit: days }
-    ).fetch().reverse(); // Reverse to get chronological order
+    // Get TVL history and aggregate by day (highest value per day)
+    const allTvlData = TvlCollection.find(
+      { timestamp: { $gte: startDate } },
+      { sort: { timestamp: 1 } }
+    ).fetch();
+
+    // Group by day and take max TVL per day
+    const tvlByDay = new Map();
+    allTvlData.forEach(record => {
+      const dateKey = record.timestamp.toISOString().split('T')[0];
+      const existing = tvlByDay.get(dateKey);
+      if (!existing || record.tvlInUSD > existing.tvlInUSD) {
+        tvlByDay.set(dateKey, record);
+      }
+    });
+    const tvlHistoryData = Array.from(tvlByDay.values()).sort((a, b) =>
+      a.timestamp - b.timestamp
+    );
 
     return {
       dailyTransactions: latestDailyTx?.count?.toLocaleString() || '---',
@@ -73,10 +87,17 @@ export const Dashboard = () => {
       tvl: latestTvl?.tvlInUSD
         ? `$${latestTvl.tvlInUSD.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
         : '---',
+      bridgeActivity: latestBridgeMetrics
+        ? `${latestBridgeMetrics.depositCount} deposits, ${latestBridgeMetrics.withdrawalCount} withdrawals`
+        : '---',
+      bridgeVolume: latestBridgeMetrics?.volumeUSD
+        ? `$${latestBridgeMetrics.volumeUSD.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+        : '---',
       txHistory: txHistoryData,
       addressHistory: addrHistoryData,
       tvlHistory: tvlHistoryData,
-      isLoading
+      isLoading,
+      isLoadingBridge
     };
   }, []);
 
@@ -98,17 +119,13 @@ export const Dashboard = () => {
   }, [networkName]);
 
   useEffect(() => {
-    // Fetch 24h transactions, bridge activity and volume (these are calculated on-demand, not stored in DB)
+    // Fetch historical chart data and 24h transactions (on-demand calculations)
     fetch24hTransactions();
-    fetchBridgeActivity();
-    fetchBridgeVolume();
     fetchBridgeHistoricalData();
 
-    // Update metrics every 5 minutes (matches server-side calculation schedule)
+    // Update historical charts every 5 minutes
     const metricsInterval = setInterval(() => {
       fetch24hTransactions();
-      fetchBridgeActivity();
-      fetchBridgeVolume();
       fetchBridgeHistoricalData();
     }, 5 * 60 * 1000);
 
@@ -128,34 +145,6 @@ export const Dashboard = () => {
       setBridgeVolumeHistory(volumeData || []);
     } catch (error) {
       console.error('Error fetching bridge historical data:', error);
-    }
-  };
-
-  const fetchBridgeActivity = async () => {
-    try {
-      setIsLoadingBridge(true);
-      const result = await Meteor.callAsync('kpis.getBridgeActivity');
-      if (result && result.depositCount !== undefined) {
-        setBridgeActivity(`${result.depositCount} deposits, ${result.withdrawalCount} withdrawals`);
-      }
-    } catch (error) {
-      console.error('Error fetching bridge activity:', error);
-    } finally {
-      setIsLoadingBridge(false);
-    }
-  };
-
-  const fetchBridgeVolume = async () => {
-    try {
-      setIsLoadingVolume(true);
-      const result = await Meteor.callAsync('kpis.getBridgeVolume');
-      if (result && result.volumeUSD !== undefined) {
-        setBridgeVolume(`$${result.volumeUSD.toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0})}`);
-      }
-    } catch (error) {
-      console.error('Error fetching bridge volume:', error);
-    } finally {
-      setIsLoadingVolume(false);
     }
   };
 
@@ -250,7 +239,7 @@ export const Dashboard = () => {
           value={bridgeVolume}
           description="Total volume (24h)"
           icon={DollarSign}
-          isLoading={isLoadingVolume}
+          isLoading={isLoadingBridge}
           chartData={bridgeVolumeHistory}
           chartDataKey="volumeUSD"
           chartColor="#ec4899"

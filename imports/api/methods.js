@@ -10,6 +10,8 @@ import {
   calculateBridgeActivity,
   calculateBridgeActivityFromTransactions,
   calculateBridgeVolume,
+  getBridgeActivity,
+  getBridgeVolume,
   getDailyTransactionsHistory,
   getWeeklyActiveAddressesHistory,
   getTvlHistory,
@@ -96,21 +98,22 @@ Meteor.methods({
   },
 
   /**
-   * Calculate bridge activity (deposits/withdrawals in 24h)
-   * Now uses actual bridge transactions instead of TVL changes
+   * Get bridge activity (deposits/withdrawals in 24h)
+   * Returns cached data - no price fetching, instant response!
    */
   async 'kpis.getBridgeActivity'() {
     if (!this.isSimulation) {
-      return await calculateBridgeActivityFromTransactions();
+      return await getBridgeActivity();
     }
   },
 
   /**
-   * Calculate 24h bridge volume in USD
+   * Get 24h bridge volume in USD
+   * Returns cached data - no price fetching, instant response!
    */
   async 'kpis.getBridgeVolume'() {
     if (!this.isSimulation) {
-      return await calculateBridgeVolume();
+      return await getBridgeVolume();
     }
   },
 
