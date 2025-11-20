@@ -19,6 +19,8 @@ export const Dashboard = () => {
   // Modal state
   const [showAddressModal, setShowAddressModal] = useState(false);
   const [addressDetails, setAddressDetails] = useState([]);
+  const [showTvlModal, setShowTvlModal] = useState(false);
+  const [tvlBreakdown, setTvlBreakdown] = useState([]);
 
   // 24h transactions state
   const [transactions24h, setTransactions24h] = useState('---');
@@ -169,6 +171,16 @@ export const Dashboard = () => {
     }
   };
 
+  const handleTvlClick = async () => {
+    try {
+      const tvlData = await Meteor.callAsync('kpis.getTvlBreakdown');
+      setTvlBreakdown(tvlData?.tokenBreakdown || []);
+      setShowTvlModal(true);
+    } catch (error) {
+      console.error('Error fetching TVL breakdown:', error);
+    }
+  };
+
   return (
     <div className="dashboard">
       <div className="dashboard-header">
@@ -220,6 +232,8 @@ export const Dashboard = () => {
           chartDataKey="tvlInUSD"
           chartColor="#3b82f6"
           chartTitle="TVL History (7d)"
+          onClick={handleTvlClick}
+          clickable={true}
         />
 
         <KpiRow
@@ -282,6 +296,44 @@ export const Dashboard = () => {
                       <td>{new Date(addr.lastSeen).toLocaleString()}</td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TVL Breakdown Modal */}
+      {showTvlModal && (
+        <div className="modal-overlay" onClick={() => setShowTvlModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Bridge TVL Breakdown</h2>
+              <button className="modal-close" onClick={() => setShowTvlModal(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <table className="address-table">
+                <thead>
+                  <tr>
+                    <th>Token</th>
+                    <th>Amount</th>
+                    <th>Price</th>
+                    <th>Value (USD)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tvlBreakdown.map((token) => (
+                    <tr key={token.symbol}>
+                      <td><strong>{token.symbol}</strong></td>
+                      <td>{token.amount?.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                      <td>${token.price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}</td>
+                      <td><strong>${token.valueUSD?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></td>
+                    </tr>
+                  ))}
+                  <tr style={{ borderTop: '2px solid #333', fontWeight: 'bold' }}>
+                    <td colSpan="3" style={{ textAlign: 'right' }}>Total TVL:</td>
+                    <td><strong>${tvlBreakdown.reduce((sum, t) => sum + (t.valueUSD || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></td>
+                  </tr>
                 </tbody>
               </table>
             </div>

@@ -145,6 +145,18 @@ Meteor.methods({
   },
 
   /**
+   * Get TVL breakdown by token
+   * Returns latest TVL data with tokenBreakdown array
+   */
+  async 'kpis.getTvlBreakdown'() {
+    if (!this.isSimulation) {
+      const { TvlCollection } = await import('/imports/api/collections');
+      const latest = await TvlCollection.findOneAsync({}, { sort: { timestamp: -1 } });
+      return latest;
+    }
+  },
+
+  /**
    * Get historical bridge activity data (calculated from TVL changes)
    */
   async 'kpis.getBridgeActivityHistory'(days = 7) {
