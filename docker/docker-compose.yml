@@ -1,3 +1,5 @@
+name: partyhouse
+
 services:
   # MongoDB Database
   mongodb:
