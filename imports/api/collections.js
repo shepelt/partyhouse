@@ -55,3 +55,14 @@ export const AddressActivityCollection = new Mongo.Collection('addressActivity')
  * }
  */
 export const BridgeMetricsCollection = new Mongo.Collection('bridgeMetrics');
+
+/**
+ * Token Prices Collection
+ * Caches token prices from CoinGecko to avoid rate limiting
+ * Document: {
+ *   asset: 'HPP',
+ *   priceUSD: 0.068,
+ *   updatedAt: Date
+ * }
+ */
+export const TokenPricesCollection = new Mongo.Collection('tokenPrices');

@@ -17,6 +17,9 @@ const SimpleLineChart = ({ data, dataKey, color = '#8b5cf6', title = 'Last 7 day
   const max = Math.max(...values);
   const range = max - min || 1;
 
+  // Check if this is a USD-based metric
+  const isUSD = dataKey.toLowerCase().includes('usd');
+
   // SVG dimensions
   const width = 300;
   const height = 120;
@@ -35,12 +38,13 @@ const SimpleLineChart = ({ data, dataKey, color = '#8b5cf6', title = 'Last 7 day
 
   // Format numbers compactly for Y-axis labels (no decimals)
   const formatYAxisLabel = (value) => {
+    const prefix = isUSD ? '$' : '';
     if (value >= 1000000) {
-      return `${(value / 1000000).toFixed(1)}M`;
+      return `${prefix}${(value / 1000000).toFixed(1)}M`;
     } else if (value >= 1000) {
-      return `${(value / 1000).toFixed(0)}K`;
+      return `${prefix}${(value / 1000).toFixed(0)}K`;
     }
-    return Math.round(value).toLocaleString();
+    return `${prefix}${Math.round(value).toLocaleString()}`;
   };
 
   return (

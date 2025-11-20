@@ -298,4 +298,106 @@ Meteor.methods({
       return { blockNumber, type105Count: type105Txs.length, transactions: results };
     }
   },
+
+  /**
+   * Backfill priceUSD for existing ERC-20 bridge records
+   * Uses cached prices from TokenPricesCollection when available
+   */
+  async 'kpis.backfillErc20Prices'() {
+    if (this.isSimulation) return;
+
+    const { BridgeActivityCollection } = await import('/imports/api/collections');
+    const { getTokenPrice } = await import('/server/kpis');
+
+    // Find all ERC-20 records without priceUSD
+    const records = await BridgeActivityCollection.find({
+      type: 'erc20_bridge',
+      priceUSD: { $exists: false }
+    }).fetchAsync();
+
+    console.log(`📊 Backfilling prices for ${records.length} ERC-20 records (will use cached prices when available)...`);
+
+    let updated = 0;
+    let skipped = 0;
+
+    for (const record of records) {
+      if (!record.asset) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        // getTokenPrice now checks cache first, then fetches if needed
+        const price = await getTokenPrice(record.asset);
+        if (price) {
+          await BridgeActivityCollection.updateAsync(record._id, {
+            $set: { priceUSD: price }
+          });
+          updated++;
+          console.log(`  ✅ Updated ${record.asset}: $${price}`);
+        } else {
+          skipped++;
+          console.log(`  ⚠️  No price found for ${record.asset}`);
+        }
+      } catch (err) {
+        skipped++;
+        console.warn(`  ❌ Failed to fetch price for ${record.asset}: ${err.message}`);
+      }
+    }
+
+    const result = `Backfill complete: ${updated} updated, ${skipped} skipped`;
+    console.log(`✅ ${result}`);
+    return result;
+  },
+
+  /**
+   * Manually set ERC-20 prices (use when CoinGecko is rate limited)
+   */
+  async 'kpis.setErc20PricesManual'(prices = { HPP: 0.068358 }) {
+    if (this.isSimulation) return;
+
+    const { BridgeActivityCollection } = await import('/imports/api/collections');
+
+    let updated = 0;
+
+    for (const [asset, price] of Object.entries(prices)) {
+      const result = await BridgeActivityCollection.updateAsync(
+        { type: 'erc20_bridge', asset: asset, priceUSD: { $exists: false } },
+        { $set: { priceUSD: price } },
+        { multi: true }
+      );
+      updated += result;
+      console.log(`  ✅ Set ${asset} price to $${price} for ${result} records`);
+    }
+
+    const result = `Manually set prices for ${updated} records`;
+    console.log(`✅ ${result}`);
+    return result;
+  },
+
+  /**
+   * Check ERC-20 bridge records (diagnostic)
+   */
+  async 'kpis.checkErc20Records'() {
+    if (this.isSimulation) return;
+
+    const { BridgeActivityCollection } = await import('/imports/api/collections');
+
+    const records = await BridgeActivityCollection.find({
+      type: 'erc20_bridge'
+    }).fetchAsync();
+
+    console.log(`Found ${records.length} ERC-20 records:`);
+    records.forEach(r => {
+      console.log(`  ${r.asset}: ${r.value} tokens, priceUSD: ${r.priceUSD || 'NOT SET'}, timestamp: ${r.timestamp}`);
+    });
+
+    return records.map(r => ({
+      asset: r.asset,
+      value: r.value,
+      priceUSD: r.priceUSD,
+      valueUSD: r.priceUSD ? r.value * r.priceUSD : null,
+      timestamp: r.timestamp
+    }));
+  },
 });

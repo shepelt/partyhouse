@@ -6,7 +6,8 @@ import {
   AddressActivityCollection,
   TvlCollection,
   BridgeActivityCollection,
-  BridgeMetricsCollection
+  BridgeMetricsCollection,
+  TokenPricesCollection
 } from '../imports/api/collections.js';
 
 // Cache ETH price for 5 minutes to avoid rate limiting
@@ -417,6 +418,15 @@ async function processBlock(blockNumber, provider) {
                 if (isTokenDeposit && tokenSymbol) {
                   // ERC-20 token deposit
                   console.log(`  ✅ ERC-20 deposit detected: ${tokenAmount || '(amount unknown)'} ${tokenSymbol} in block ${blockNumber}`);
+
+                  // Fetch token price and store it
+                  let priceUSD = null;
+                  try {
+                    priceUSD = await getTokenPrice(tokenSymbol);
+                  } catch (err) {
+                    console.warn(`  ⚠️  Could not fetch ${tokenSymbol} price, storing without price`);
+                  }
+
                   await BridgeActivityCollection.insertAsync({
                     txHash: txHash,
                     type: 'erc20_bridge',
@@ -425,6 +435,7 @@ async function processBlock(blockNumber, provider) {
                     from: tx.from.toLowerCase(),
                     to: tx.to ? tx.to.toLowerCase() : null,
                     value: tokenAmount,
+                    priceUSD: priceUSD,
                     timestamp: blockTimestamp,
                     blockNumber: blockNumber,
                     l2TxHash: txHash
@@ -463,6 +474,14 @@ async function processBlock(blockNumber, provider) {
                   try {
                     const amount = await parseGatewayTransaction(tx, token);
 
+                    // Fetch token price and store it
+                    let priceUSD = null;
+                    try {
+                      priceUSD = await getTokenPrice(token.symbol);
+                    } catch (err) {
+                      console.warn(`  ⚠️  Could not fetch ${token.symbol} price, storing without price`);
+                    }
+
                     await BridgeActivityCollection.insertAsync({
                       txHash: txHash,
                       type: 'erc20_bridge',
@@ -471,6 +490,7 @@ async function processBlock(blockNumber, provider) {
                       from: tx.from.toLowerCase(),
                       to: tx.to.toLowerCase(),
                       value: amount, // ← Parsed from transaction data!
+                      priceUSD: priceUSD,
                       timestamp: blockTimestamp,
                       blockNumber: blockNumber,
                       l2TxHash: txHash
@@ -797,20 +817,34 @@ async function parseGatewayTransaction(tx, token) {
  */
 async function getTokenPrice(symbol, retryCount = 0) {
   const MAX_RETRIES = 2;
+  const CACHE_DURATION_MS = 60 * 60 * 1000; // 1 hour
 
   try {
+    // Check cache first
+    const cached = await TokenPricesCollection.findOneAsync({ asset: symbol });
+    if (cached) {
+      const age = Date.now() - cached.updatedAt.getTime();
+      if (age < CACHE_DURATION_MS) {
+        if (retryCount === 0) {
+          console.log(`  💾 Using cached ${symbol} price: $${cached.priceUSD} (age: ${Math.round(age / 1000)}s)`);
+        }
+        return cached.priceUSD;
+      }
+    }
+
     const hppSettings = Meteor.settings.hpp;
     const priceApi = hppSettings?.priceApi;
 
     if (!priceApi) {
       console.warn('Price API not configured in settings');
-      return null;
+      // Return cached price even if old, better than null
+      return cached?.priceUSD || null;
     }
 
     const tokenId = priceApi.tokenIds?.[symbol];
     if (!tokenId) {
       // Token not mapped or explicitly set to null
-      return null;
+      return cached?.priceUSD || null;
     }
 
     // Support different price API providers
@@ -856,6 +890,12 @@ async function getTokenPrice(symbol, retryCount = 0) {
 
       if (price) {
         console.log(`✅ ${symbol} price: $${price}`);
+
+        // Update cache
+        await TokenPricesCollection.upsertAsync(
+          { asset: symbol },
+          { $set: { asset: symbol, priceUSD: price, updatedAt: new Date() } }
+        );
       } else {
         console.warn(`⚠️  ${symbol} price not found in response:`, JSON.stringify(data));
       }
@@ -1204,12 +1244,14 @@ export async function calculateBridgeVolume() {
     // Calculate total USD volume
     let totalVolumeUSD = (totalEthDepositsETH + totalWithdrawalsETH) * ethPrice;
 
-    // Add ERC-20 token volume
+    // Add ERC-20 token volume (only using stored prices - instant, no API calls)
     let erc20VolumeUSD = 0;
     for (const deposit of erc20Deposits) {
-      const price = await getTokenPrice(deposit.asset);
-      if (price && deposit.value) {
-        const valueUSD = deposit.value * price;
+      if (!deposit.value) continue;
+
+      // Use stored price if available (skip records without stored price)
+      if (deposit.priceUSD) {
+        const valueUSD = deposit.value * deposit.priceUSD;
         erc20VolumeUSD += valueUSD;
         totalVolumeUSD += valueUSD;
       }
@@ -1802,6 +1844,10 @@ export async function getTvlHistory(days = 7) {
 export async function getBridgeVolumeHistory(days = 7) {
   try {
     const ethPrice = await getEthPrice();
+
+    // Use 0 for ETH volume if price unavailable (still include ERC-20 volumes)
+    const ethPriceOrZero = ethPrice || 0;
+
     const now = new Date();
     const activityHistory = [];
 
@@ -1825,17 +1871,37 @@ export async function getBridgeVolumeHistory(days = 7) {
         timestamp: { $gte: date, $lt: nextDate }
       }).fetchAsync();
 
+      // Get ERC-20 deposits for this day
+      const erc20Deposits = await BridgeActivityCollection.find({
+        type: 'erc20_bridge',
+        timestamp: { $gte: date, $lt: nextDate }
+      }).fetchAsync();
+
       const depositETH = deposits.reduce((sum, d) => sum + d.value, 0);
       const withdrawalETH = withdrawals.reduce((sum, w) => sum + w.value, 0);
       const totalVolumeETH = depositETH + withdrawalETH;
-      const volumeUSD = totalVolumeETH * ethPrice;
+      let volumeUSD = totalVolumeETH * ethPriceOrZero;
+
+      // Add ERC-20 token volume (only using stored prices - instant, no API calls)
+      let erc20VolumeUSD = 0;
+      for (const deposit of erc20Deposits) {
+        if (!deposit.value) continue;
+
+        // Use stored price if available (skip records without stored price)
+        if (deposit.priceUSD) {
+          const valueUSD = deposit.value * deposit.priceUSD;
+          erc20VolumeUSD += valueUSD;
+          volumeUSD += valueUSD;
+        }
+      }
 
       activityHistory.push({
         date: date.toISOString().split('T')[0],
         timestamp: date,
         volumeUSD,
         volumeETH: totalVolumeETH,
-        depositCount: deposits.length,
+        erc20VolumeUSD,
+        depositCount: deposits.length + erc20Deposits.length,
         withdrawalCount: withdrawals.length
       });
     }
