@@ -1092,9 +1092,9 @@ export async function calculateBridgeActivityFromTransactions() {
     const now = new Date();
     const twentyFourHoursAgo = new Date(now - 24 * 60 * 60 * 1000);
 
-    // Get deposits in last 24h
+    // Get deposits in last 24h (both ETH and ERC-20)
     const deposits = await BridgeActivityCollection.find({
-      type: 'deposit',
+      type: { $in: ['deposit', 'erc20_bridge'] },
       timestamp: { $gte: twentyFourHoursAgo }
     }).fetchAsync();
 
@@ -1627,11 +1627,11 @@ export async function getBridgeActivityHistory(days = 7) {
     startDate.setDate(startDate.getDate() - days);
     startDate.setHours(0, 0, 0, 0);
 
-    // Aggregate deposits by day
+    // Aggregate deposits by day (both ETH and ERC-20)
     const depositsPipeline = [
       {
         $match: {
-          type: 'deposit',
+          type: { $in: ['deposit', 'erc20_bridge'] },
           timestamp: { $gte: startDate }
         }
       },
